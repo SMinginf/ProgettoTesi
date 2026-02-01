@@ -1,6 +1,6 @@
 import json
 from src.schemas import CapabilityReport
-import pandas as pd # Opzionale, ma se hai pandas è più robusto. Qui faccio versione pure python.
+from langchain.messages import HumanMessage
 
 def clean_tool_output(result) -> str:
     """
@@ -265,6 +265,7 @@ def classify_stability(current, avg, std, delta_threshold):
 
 
 def json_to_markdown_table(data, key_label="Node", columns=None) -> str:
+
     """
     Converte strutture dati in Markdown.
     Args:
@@ -338,3 +339,16 @@ def json_to_markdown_table(data, key_label="Node", columns=None) -> str:
         lines.append(" | ".join(values))
 
     return "\n".join(lines)
+
+def get_last_user_message(messages):
+    """
+    Scorre la lista dei messaggi al contrario per trovare 
+    l'ultimo input fornito dall'utente (HumanMessage).
+    """
+    # reversed(messages) ci permette di partire dall'ultimo messaggio aggiunto
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return message.content
+            
+    # Fallback di sicurezza se non si trova nessun messaggio umano
+    return ""

@@ -61,7 +61,7 @@ async def context_manager_node(state: AgentState):
         # 1. Estrazione della stringa JSON grezza dal risultato del tool
         raw_json_str = ""
         
-        # Gestione vari formati di output (il tuo sembra essere una lista di dizionari o oggetti)
+        # Gestione vari formati di output (ad es. lista di dizionari o oggetti)
         if isinstance(targets_result, list) and len(targets_result) > 0:
             first_item = targets_result[0]
             # Se è un oggetto TextContent o un dizionario
@@ -77,17 +77,18 @@ async def context_manager_node(state: AgentState):
             raw_json_str = str(targets_result)
 
         # 2. Parsing del JSON
-        # La stringa inizia con '{"activeTargets": ...}'
         try:
             data = json.loads(raw_json_str)
+            
+            # La stringa inizia con '{"activeTargets": ...}'
             active_targets_raw = data.get("activeTargets", [])
             
             for t in active_targets_raw:
                 labels = t.get("labels", {})
-                # Cerchiamo il nome "umano" (es. worker-1)
+                # Cerco il nome "umano" (es. worker-1)
                 name = labels.get("name")
                 
-                # Se non c'è "name", proviamo "instance" (es. IP:Port)
+                # Se non c'è "name", provo "instance" (es. IP:Port)
                 if not name:
                     name = labels.get("instance")
                 
@@ -99,7 +100,7 @@ async def context_manager_node(state: AgentState):
 
         # Convertiamo in lista ordinata per coerenza
         targets_list = sorted(list(unique_names))
-        log.info(f"✅ Nodi unici identificati: {targets_list}")
+        log.info(f"✅ Nodi identificati: {targets_list}")
              
     except Exception as e:
         log.error(f"⛔ ERRORE GET TARGETS: {e}")
@@ -125,7 +126,7 @@ async def context_manager_node(state: AgentState):
             
             num_metrics = len(qos_config.get('metrics', {}))
             num_profiles = len(qos_config.get('profiles', {}))
-            log.info(f"✅ Knowledge Base caricata: [bold]{num_metrics}[/bold] metriche, [bold]{num_profiles}[/bold] profili.")
+            log.info(f"✅ Configurazione QoS caricata: [bold]{num_metrics}[/bold] metriche, [bold]{num_profiles}[/bold] profili.")
         else:
             log.warning(f"⚠️ Il server ha restituito una lista vuota per l'URI: {TARGET_URI}")
             qos_config = {"metrics": {}, "profiles": {}}
@@ -142,9 +143,9 @@ async def context_manager_node(state: AgentState):
     # Safety Check
     if not qos_config.get("profiles"):
         log.warning("ATTENZIONE: Configurazione QoS vuota o profili mancanti.")
-        msg = "ATTENZIONE: Configurazione QoS vuota. L'analisi capacità non funzionerà."
+        msg = "ATTENZIONE: Configurazione QoS vuota. L'agente non funzionerà correttamente."
     else:
-        msg = "System Ready. Knowledge Loaded via Resources."
+        msg = "Sistema pronto. Configurazione caricata tramite resource."
 
     return {
         "active_targets": targets_list,

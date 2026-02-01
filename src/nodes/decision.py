@@ -7,8 +7,8 @@ from src.config import llm, console
 from src.schemas import (UserRequestClassification,
                               TaskProfileIntent,
                                 RequirementExtraction)
-from langchain.messages import HumanMessage
-from src.utils import humanize_metrics_with_config, json_to_markdown_table
+from langchain.messages import HumanMessage, AIMessage
+from src.utils import humanize_metrics_with_config, json_to_markdown_table, get_last_user_message
 from src.logger import log
 
 
@@ -18,21 +18,20 @@ async def classify_intent_node(state: AgentState):
     Analizza l'input utente e determina l'intento: "allocation" o "status".
     Inoltre, estrae un filtro target se specificato (es. nome server).  
     """
-    user_input = state["messages"][-1].content
+    user_input = get_last_user_message(state["messages"])
 
-    # In classify_intent_node...
+    # Recupera i nodi attivi dallo stato e formatta per il prompt
     targets_raw = state.get("active_targets", [])
     
-    # Se setup.py ha fatto il suo lavoro, targets_raw è ['worker-1', 'worker-2'...]
     if isinstance(targets_raw, list) and targets_raw:
-        formatted_targets = "\n- ".join(targets_raw) # Crea elenco puntato perfetto
+        formatted_targets = "\n- ".join(targets_raw) # Crea elenco puntato
     else:
         formatted_targets = "Nessun nodo rilevato."
     
     prompt = f"""
     Analizza la seguente richiesta e classificala: "{user_input}"
     
-    Restituisci l'intento e inserisci in "target_filter" il nome del nodo specifico se menzionato, altrimenti non inserire nulla.
+    Restituisci l'intento e inserisci in "target_filter" il nome del nodo specifico se menzionato e se esiste tra i nodi validi, altrimenti non inserire nulla.
 
     Nodi validi:
     {formatted_targets} 
@@ -42,38 +41,19 @@ async def classify_intent_node(state: AgentState):
     try:
         response = await structured_llm.ainvoke(prompt)
         
-
         intent = response.intent
         target = response.target_filter
 
-        
-        
-        # if target and target.lower() in ["nessuno", "none", "null", "n/a", "tutti", "all"]:
-        #     target = None
+               
+        if target and target.lower() in ["nessuno", "none", "null", "n/a", "tutti", "all"]:
+            target = None
 
-        # # LOGGING
-        # log.info(f"🧠 Intent detected: [bold magenta]{intent}[/bold magenta]")
-        # if target:
-        #     log.info(f"🎯 Target Filter: [bold]{target}[/bold]")
-
-        # LOG DI DEBUG: Vediamo cosa dice l'LLM prima che noi lo tocchiamo
-        # Se qui vedi "None" quando chiedi di "worker-1", colpa dell'LLM.
-        log.debug(f"🔍 Raw LLM Output -> Intent: {intent} | Target: {target}")
-
-        # --- SANITIZZAZIONE ---
-        # Pulizia robusta per evitare falsi positivi come "nessuno" o stringhe vuote
-        if target and isinstance(target, str):
-            clean_target = target.strip().lower()
-            if clean_target in ["nessuno", "none", "null", "n/a", "tutti", "all", ""]:
-                target = None
-        
-        # LOGGING UFFICIALE
-        log.info(f"🧠 Intent detected: [bold magenta]{intent}[/bold magenta]\n")
-        
+        # LOGGING
+        log.info(f"🧠 Classificazione intento: [bold magenta]{intent}[/bold magenta]")
         if target:
-            log.info(f"🎯 Target Filter: [bold cyan]{target}[/bold cyan]")
-        else:
-            log.info(f"🎯 Target Filter: nessuno (Analisi Cluster Completo)")
+            log.info(f"🎯 Target: [bold]{target}[/bold]")
+
+        
 
     except Exception as e:
         log.error(f"Errore classificazione intento: {e}")
@@ -88,13 +68,7 @@ async def classify_task_node(state: AgentState):
     Step 1: Capire la natura del task (CPU vs RAM vs Disk).
     Non si preoccupa dei numeri specifici.
     """
-    # --- FIX: NON usare state["messages"][-1] alla cieca ---
-    # Scansioniamo la storia all'indietro per trovare l'ultimo messaggio UMANO
-    user_input = "N/A"
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
-            user_input = msg.content
-            break
+    user_input = get_last_user_message(state["messages"])
             
     # Debug opzionale per vedere cosa sta leggendo
     # print(f"DEBUG: Analyzing User Input: {user_input}")
@@ -147,12 +121,8 @@ async def constraint_extractor_node(state: AgentState):
     """
     Step 2: Estrarre numeri e convertirli in vincoli Prometheus validi.
     """
-    # --- FIX: Recupero ultimo messaggio umano ---
-    user_input = "N/A"
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
-            user_input = msg.content
-            break
+    # --- Recupero ultimo messaggio umano ---
+    user_input = get_last_user_message(state["messages"])
 
     config = state.get("qos_config", {})
     metrics = config.get("metrics", {})
@@ -369,7 +339,7 @@ async def allocation_advisor_node(state: AgentState):
     log.info(Panel("🚀 Allocation Advisor (Deep Scan)", style="grey50"))
 
     if not candidates:
-        return {"messages": [HumanMessage(content="❌ Nessun nodo idoneo trovato.")]}
+        return {"messages": [AIMessage(content="❌ Nessun nodo idoneo trovato.")]}
     
     # --- FASE 1: PREPARAZIONE PESI (WEIGHT MIXING) ---
     # Determiniamo quali metriche contano per questa decisione.
@@ -603,7 +573,7 @@ async def allocation_advisor_node_llm(state: AgentState):
     
     # Se non ci sono candidati, usciamo subito
     if not candidates:
-        return {"messages": [HumanMessage(content="❌ Nessun nodo idoneo trovato in base ai filtri applicati.")]}
+        return {"messages": [AIMessage(content="❌ Nessun nodo idoneo trovato in base ai filtri applicati.")]}
 
     try:
         metrics_data = json.loads(metrics_json)
