@@ -9,6 +9,7 @@ from src.schemas import (UserRequestClassification,
                                 RequirementExtraction)
 from langchain.messages import HumanMessage
 from src.utils import humanize_metrics_with_config, json_to_markdown_table
+from src.logger import log
 
 
 # --- NODO 3: CLASSIFIER ---
@@ -19,33 +20,70 @@ async def classify_intent_node(state: AgentState):
     """
     user_input = state["messages"][-1].content
 
+    # In classify_intent_node...
+    targets_raw = state.get("active_targets", [])
+    
+    # Se setup.py ha fatto il suo lavoro, targets_raw è ['worker-1', 'worker-2'...]
+    if isinstance(targets_raw, list) and targets_raw:
+        formatted_targets = "\n- ".join(targets_raw) # Crea elenco puntato perfetto
+    else:
+        formatted_targets = "Nessun nodo rilevato."
     
     prompt = f"""
-    Analizza la seguente richiesta utente: "{user_input}"
+    Analizza la seguente richiesta e classificala: "{user_input}"
     
-    CLASSIFICAZIONE INTENTO:
-    1. "allocation": Se l'utente vuole trovare risorse, deployare, cerca un server adatto.
-    2. "status": Se l'utente chiede lo stato, la salute, le metriche attuali dei server.
-    
-    Restituisci l'intento e inserisci in "target_filter" il nome del server specifico se menzionato.
+    Restituisci l'intento e inserisci in "target_filter" il nome del nodo specifico se menzionato, altrimenti non inserire nulla.
+
+    Nodi validi:
+    {formatted_targets} 
     """
     structured_llm = llm.with_structured_output(UserRequestClassification)
-    response = await structured_llm.ainvoke(prompt)
     
+    try:
+        response = await structured_llm.ainvoke(prompt)
+        
 
-    intent = response['intent']
-    target = response['target_filter']
-    
-    # Stampa di debug/estetica
-    color_map = {"allocation": "green", "status": "blue", "chat": "white"}
-    color = color_map.get(intent, "white")
-    
-    console.print(Panel(f"Intent rilevato: [bold {color}]{intent.upper()}[/bold {color}]", title="Intent Classifier", border_style=color))
+        intent = response.intent
+        target = response.target_filter
 
+        
+        
+        # if target and target.lower() in ["nessuno", "none", "null", "n/a", "tutti", "all"]:
+        #     target = None
+
+        # # LOGGING
+        # log.info(f"🧠 Intent detected: [bold magenta]{intent}[/bold magenta]")
+        # if target:
+        #     log.info(f"🎯 Target Filter: [bold]{target}[/bold]")
+
+        # LOG DI DEBUG: Vediamo cosa dice l'LLM prima che noi lo tocchiamo
+        # Se qui vedi "None" quando chiedi di "worker-1", colpa dell'LLM.
+        log.debug(f"🔍 Raw LLM Output -> Intent: {intent} | Target: {target}")
+
+        # --- SANITIZZAZIONE ---
+        # Pulizia robusta per evitare falsi positivi come "nessuno" o stringhe vuote
+        if target and isinstance(target, str):
+            clean_target = target.strip().lower()
+            if clean_target in ["nessuno", "none", "null", "n/a", "tutti", "all", ""]:
+                target = None
+        
+        # LOGGING UFFICIALE
+        log.info(f"🧠 Intent detected: [bold magenta]{intent}[/bold magenta]\n")
+        
+        if target:
+            log.info(f"🎯 Target Filter: [bold cyan]{target}[/bold cyan]")
+        else:
+            log.info(f"🎯 Target Filter: nessuno (Analisi Cluster Completo)")
+
+    except Exception as e:
+        log.error(f"Errore classificazione intento: {e}")
+        # Fallback prudente
+        return {"intent": "status", "target_filter": None}
+    
     return {"intent": intent, "target_filter": target}
 
 
-async def intent_classifier_node(state: AgentState):
+async def classify_task_node(state: AgentState):
     """
     Step 1: Capire la natura del task (CPU vs RAM vs Disk).
     Non si preoccupa dei numeri specifici.
@@ -92,7 +130,7 @@ async def intent_classifier_node(state: AgentState):
     sel_profiles = result.selected_profiles
     reason = result.reasoning
     
-    console.print(Panel(
+    log.info(Panel(
         f"Task mappato su: [bold magenta]{sel_profiles}[/bold magenta]\n[italic dim]\"{reason}\"[/italic dim]",
         title="🧠 Technical Profiler",
         border_style="magenta"
@@ -159,9 +197,9 @@ async def constraint_extractor_node(state: AgentState):
     
         if constraints_list:
             c_text = "\n".join([f"- [bold]{c['metric_name']}[/bold] {c['operator']} {c['value']} ({c['original_text']})" for c in constraints_list])
-            console.print(Panel(c_text, title="📏 Vincoli Estratti", border_style="yellow"))
+            log.info(Panel(c_text, title="📏 Vincoli Estratti", border_style="yellow"))
         else:
-            console.print("[dim yellow]   ℹ️  Nessun vincolo numerico esplicito trovato.[/dim yellow]")
+            log.info("ℹ️  Nessun vincolo numerico esplicito trovato.")
         
         return {"explicit_constraints": constraints_list}
         
@@ -175,7 +213,7 @@ async def candidate_filter_node(state: AgentState):
     
     Questo nodo riceve:
     1. I risultati tecnici di TUTTI i profili (dal Map-Reduce 'single_profile_evaluator').
-    2. L'intenzione dell'utente (da 'intent_classifier').
+    2. L'intenzione dell'utente (da 'task_classifier').
     3. I vincoli espliciti (da 'constraint_extractor').
     
     Obiettivo: Trovare l'intersezione dei nodi che soddisfano TUTTO.
@@ -200,7 +238,7 @@ async def candidate_filter_node(state: AgentState):
     except:
         metrics_data = {}
 
-    console.print("\n[bold grey50]--- 🌪️ Filtering Candidates ---[/bold grey50]")
+    log.info(Panel("🌪️ Filtering Candidates", style="grey50"))
 
     # --- FASE 1: FILTRO PER PROFILO (Capability Intersection) ---
     # Logica: Se l'utente vuole CPU e RAM, il nodo deve essere idoneo per ENTRAMBI.
@@ -223,7 +261,7 @@ async def candidate_filter_node(state: AgentState):
     if not target_profiles:
         # Caso: L'utente non ha specificato un profilo (richiesta generica)
         # O il classificatore ha fallito. Consideriamo TUTTI i nodi che hanno superato almeno un test.
-        console.print("[yellow]⚠️ Nessun profilo target specifico. Considero tutti i nodi tecnicamente validi.[/yellow]")
+        log.warning("⚠️ Nessun profilo target specifico. Considero tutti i nodi tecnicamente validi.")
         for nodes_set in profile_qualification_map.values():
             initial_candidates.update(nodes_set)
     else:
@@ -232,9 +270,9 @@ async def candidate_filter_node(state: AgentState):
         first_prof = target_profiles[0]
         if first_prof in profile_qualification_map:
             initial_candidates = set(profile_qualification_map[first_prof])
-            console.print(f"Base candidati ({first_prof}): {len(initial_candidates)} nodi.")
+            log.info(f"Base candidati ({first_prof}): {len(initial_candidates)} nodi.")
         else:
-            console.print(f"[red]❌ Errore: Nessun risultato tecnico per il profilo {first_prof}[/red]")
+            log.error(f"❌ Errore: Nessun risultato tecnico per il profilo {first_prof}")
             # Se manca il primo profilo, l'intersezione sarà vuota
             initial_candidates = set()
 
@@ -243,16 +281,15 @@ async def candidate_filter_node(state: AgentState):
             p_nodes = profile_qualification_map.get(p_name, set())
             prev_count = len(initial_candidates)
             initial_candidates.intersection_update(p_nodes)
-            console.print(f"Intersezione con {p_name}: {prev_count} -> {len(initial_candidates)} nodi.")
-
+            log.info(f"Intersezione con {p_name}: {prev_count} -> {len(initial_candidates)} nodi.")
     # --- FASE 2: FILTRO PER VINCOLI UTENTE (Explicit Constraints) ---
     # Logica: Applicare le regole matematiche (es. ram > 8GB)
     
     final_candidates = list(initial_candidates)
     
     if user_constraints and final_candidates:
-        console.print(f"Applicazione {len(user_constraints)} vincoli esplicitati dall'utente...")
-        
+        log.info(f"Applicazione {len(user_constraints)} vincoli esplicitati dall'utente...")
+
         # Mappa stringa -> funzione operatore
         ops = {
             ">": operator.gt, "<": operator.lt,
@@ -275,13 +312,13 @@ async def candidate_filter_node(state: AgentState):
                 
                 # Check 1: La metrica esiste?
                 if real_val is None:
-                    console.print(f"[dim red]   - {node} scartato: Manca dato {metric_key}[/dim red]")
+                    log.info(f"[dim red]   - {node} scartato: Manca dato {metric_key}[/dim red]")
                     if node in final_candidates: final_candidates.remove(node)
                     break 
                 
                 # Check 2: Il valore rispetta la soglia?
                 if op_func and not op_func(real_val, target_val):
-                    console.print(f"[dim red]   - {node} scartato: {metric_key}={real_val} non è {op_sym} {target_val}[/dim red]")
+                    log.info(f"[dim red]   - {node} scartato: {metric_key}={real_val} non è {op_sym} {target_val}[/dim red]")
                     if node in final_candidates: final_candidates.remove(node)
                     break # Nodo scartato, inutile controllare altri vincoli
 
@@ -289,9 +326,9 @@ async def candidate_filter_node(state: AgentState):
     
     # STAMPA FINALE DEL NODO
     if final_candidates:
-        console.print(f"[green]   ✅ Finalisti:[/green] [bold]{', '.join(final_candidates)}[/bold]")
+        log.info(f"[green]   ✅ Finalisti:[/green] [bold]{', '.join(final_candidates)}[/bold]")
     else:
-        console.print("[bold red]   ⛔ Nessun candidato sopravvissuto ai filtri.[/bold red]")
+        log.warning("[bold red]   ⛔ Nessun candidato sopravvissuto ai filtri.[/bold red]")
 
     # Salviamo nello stato per l'Advisor successivo
     return {"final_candidates": final_candidates}
@@ -329,7 +366,7 @@ async def allocation_advisor_node(state: AgentState):
     except:
         metrics_data = {}
 
-    console.print("\n[bold grey50]--- 🚀 Allocation Advisor (Deep Scan) ---[/bold grey50]")
+    log.info(Panel("🚀 Allocation Advisor (Deep Scan)", style="grey50"))
 
     if not candidates:
         return {"messages": [HumanMessage(content="❌ Nessun nodo idoneo trovato.")]}
@@ -483,7 +520,8 @@ async def allocation_advisor_node(state: AgentState):
         
         issues = ", ".join(node_risks[node]) if node_risks[node] else "[green]✅ Stable[/green]"
         table.add_row(f"{i} {medal}", node, f"{score:.4f}", issues)
-    console.print(table)
+    
+    log.info(table)
 
     # --- FASE 5: PREPARAZIONE DATI PER LLM ---
     metrics_keys = list(normalized_weights_map.keys())
@@ -572,7 +610,7 @@ async def allocation_advisor_node_llm(state: AgentState):
     except:
         metrics_data = {}
 
-    console.print("\n[bold grey50]--- 🧠 Allocation Advisor (LLM Reasoning Mode) ---[/bold grey50]")
+    log.info(Panel("🧠 Allocation Advisor (LLM Reasoning Mode)", style="grey50"))
 
     # --- 2. PREPARAZIONE DEL CONTESTO (DATA PREP) ---
     # Invece di calcolare uno score, prepariamo una "Scheda Tecnica" per ogni nodo.

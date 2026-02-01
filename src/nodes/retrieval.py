@@ -1,14 +1,15 @@
 import asyncio
+import time
+import json
 from langchain.messages import SystemMessage
-from src.state import AgentState
-from src.config import client, console
 from rich.panel import Panel
 from rich.markdown import Markdown
-import time
+
+# Import interni
+from src.state import AgentState
+from src.config import client  # Rimosso 'console' perché usiamo il logger
 from src.utils import parse_prometheus_output, json_to_markdown_table
-import json
-
-
+from src.logger import log     # NUOVO: Importiamo il logger centralizzato
 
 # --- NODO 2: MOTORE DATI (Solo Esecuzione) ---
 async def metrics_engine_node(state: AgentState):
@@ -23,6 +24,7 @@ async def metrics_engine_node(state: AgentState):
     query_tool = next((t for t in tools if t.name == "execute_query"), None)
     
     if not query_tool:
+        log.error("Tool 'execute_query' non trovato su MCP Server.")
         return {
             "metrics_report": "Error: Tool 'execute_query' not found",
             "messages": [SystemMessage(content="Error: Prometheus tool missing.")]
@@ -33,19 +35,20 @@ async def metrics_engine_node(state: AgentState):
     metrics_def = config.get("metrics", {})
     
     if not metrics_def:
+        log.error("Nessuna metrica definita nella configurazione QoS.")
         return {"metrics_report": "Error: Nessuna metrica definita."}
 
-    # --- RECUPERO FILTRO TARGET (OTTIMIZZAZIONE STEP 2) ---
+    # --- RECUPERO FILTRO TARGET ---
     target_filter = state.get("target_filter")
     
     if target_filter:
-        console.print(f"[magenta]   🎯 Focus Mode Attivo: Estraggo solo dati per '{target_filter}'[/magenta]")
+        log.info(f"🎯 Focus Mode Attivo: Estraggo solo dati per '[bold magenta]{target_filter}[/bold magenta]'")
     
     # --- PREPARAZIONE TASKS ---
     tasks = []
     metric_names = [] # Teniamo traccia dell'ordine
     
-    print(f"   🚀 Avvio retrieval parallelo per {len(metrics_def)} metriche...")
+    log.info(f"🚀 Avvio retrieval parallelo per {len(metrics_def)} metriche...")
 
     for metric_name, definition in metrics_def.items():
         query = definition.get("query")
@@ -63,7 +66,7 @@ async def metrics_engine_node(state: AgentState):
 
     for metric_name, result in zip(metric_names, raw_results):
         if isinstance(result, Exception):
-            console.print(f"[dim red]⚠️ Errore query {metric_name}: {result}[/dim red]")
+            log.warning(f"⚠️ Errore query [bold]{metric_name}[/bold]: {result}")
             errors_count += 1
             continue
 
@@ -74,8 +77,6 @@ async def metrics_engine_node(state: AgentState):
             for node, value in parsed_series.items():
                 
                 # --- IL FILTRO (Push-Down Logic) ---
-                # Se c'è un filtro attivo e il nodo non corrisponde, lo scartiamo SUBITO.
-                # Risparmiamo memoria e token successivi.
                 if target_filter and node != target_filter:
                     continue
                 # -----------------------------------
@@ -85,42 +86,38 @@ async def metrics_engine_node(state: AgentState):
                 nodes_snapshot[node][metric_name] = value
                 
         except Exception as e:
-            console.print(f"[red]❌ Errore parsing {metric_name}: {e}[/red]")
+            log.error(f"❌ Errore parsing {metric_name}: {e}")
             errors_count += 1
 
     # --- STATISTICHE E LOGGING ---
     elapsed_time = time.perf_counter() - start_time
     node_count = len(nodes_snapshot)
     
-    # Feedback visivo differenziato per Focus Mode
+    # Feedback visivo differenziato
     title_suffix = f"(Focus: {target_filter})" if target_filter else "(Full Cluster)"
-    msg_color = "green" if errors_count == 0 else "yellow"
-    
-    stats_msg = (
-        f"✅ Completato in [bold white]{elapsed_time:.3f}s[/bold white]\n"
-        f"📊 Metriche: {len(metrics_def)} | Nodi Catturati: {node_count} | Errori: {errors_count}"
-    )
-    
-    console.print(Panel(
-        stats_msg,
-        title=f"Metrics Engine {title_suffix}",
-        border_style=msg_color
-    ))
+   
+ 
+    # Usiamo i colori di markup di Rich dentro la stringa
+    log.info(f"📊 [bold]Metrics Engine Report {title_suffix}[/bold]")
+    log.info(f"   ✅ Tempo: {elapsed_time:.3f}s | Metriche: {len(metrics_def)} | Nodi: {node_count} | Errori: {errors_count}")
 
     # Serializzazione
     snapshot_json = json.dumps(nodes_snapshot, indent=2)
     
-    # --- VISUALIZZAZIONE TABELLARE (Miglioria Visuale Precedente) ---
-    # Usiamo la tabella Markdown per il log invece del JSON grezzo
+    # --- VISUALIZZAZIONE TABELLARE ---
     if node_count > 0:
         preview_table = json_to_markdown_table(nodes_snapshot, key_label="Node")
-        console.print(Panel(
-            Markdown(f"{preview_table}"), 
-            title="📊 Live Data Snapshot",
-            border_style="cyan"
-        ))
+        # Invece di stampare un Pannello grafico che rompe il logger, 
+        # logghiamo che i dati sono pronti o mostriamo una preview testuale se necessario.
+        log.info(f"💾 Snapshot dati salvato in memoria ({len(snapshot_json)} bytes)")
+        
+        # Se vuoi vedere la tabella nel terminale per debug, usa console.print DIRETTO
+        # (Questo bypassa il logger e stampa la grafica carina)
+        from src.logger import console
+        console.print(Panel(Markdown(preview_table), title="📊 Live Data Debug", border_style="dim cyan"))
+        
     else:
-        console.print("[dim yellow]   ⚠️ Nessun dato trovato per il target richiesto.[/dim yellow]")
+        log.warning("⚠️ Nessun dato trovato per il target richiesto.")
 
     return {
         "metrics_report": snapshot_json,

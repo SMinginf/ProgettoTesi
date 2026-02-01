@@ -1,9 +1,11 @@
 import json
-from langchain.messages import SystemMessage
+from langchain_core.messages import SystemMessage
 from src.state import AgentState
 from src.config import client
+# IMPORTA IL LOGGER CENTRALIZZATO
+from src.logger import log
 
-# --- NODO 1 ---
+# --- NODO 1: SETUP E CONTESTO ---
 async def context_manager_node(state: AgentState):
     ''' 
     1. Verifica salute Prometheus.
@@ -19,6 +21,7 @@ async def context_manager_node(state: AgentState):
     
     # --- FASE 1: HEALTH CHECK ---
     if not health_tool:
+        log.critical("Tool 'health_check' non trovato su MCP Server.")
         return {
             "messages": [SystemMessage(content="ERRORE CRITICO: Tool 'health_check' non trovato.")],
             "sanity_check_ok": False
@@ -28,13 +31,15 @@ async def context_manager_node(state: AgentState):
         # Eseguiamo health_check
         health_result = await health_tool.ainvoke({})
         
-        # Logica di validazione: controlliamo se il risultato contiene errori o è vuoto
-        # Adattare in base a cosa restituisce esattamente il tuo server MCP
         health_str = str(health_result).lower()
         if "error" in health_str or "unhealthy" in health_str or "down" in health_str:
+             log.error(f"Health Check Fallito: {health_result}")
              raise Exception(f"Health Check Fallito: {health_result}")
+        else:
+            log.info("✅ Prometheus Health Check: OK")
              
     except Exception as e:
+        log.error(f"⛔ ERRORE HEALTH CHECK: {e}")
         return {
             "messages": [SystemMessage(content=f"⛔ ERRORE HEALTH CHECK: Il server Prometheus non risponde o è irraggiungibile.\nDettagli: {str(e)}")],
             "sanity_check_ok": False
@@ -42,51 +47,91 @@ async def context_manager_node(state: AgentState):
 
     # --- FASE 2: GET TARGETS (Solo se health passata) ---
     if not target_tool:
+        log.critical("Tool 'get_targets' non trovato.")
         return {
             "messages": [SystemMessage(content="ERRORE CRITICO: Tool 'get_targets' non trovato.")],
             "sanity_check_ok": False
         }
 
+    unique_names = set() # Usiamo un set per rimuovere automaticamente i duplicati
+
     try:
         targets_result = await target_tool.ainvoke({})
         
-        if isinstance(targets_result, list):
-             targets_clean = "\n".join([str(block) for block in targets_result])
+        # 1. Estrazione della stringa JSON grezza dal risultato del tool
+        raw_json_str = ""
+        
+        # Gestione vari formati di output (il tuo sembra essere una lista di dizionari o oggetti)
+        if isinstance(targets_result, list) and len(targets_result) > 0:
+            first_item = targets_result[0]
+            # Se è un oggetto TextContent o un dizionario
+            if hasattr(first_item, "text"):
+                raw_json_str = first_item.text
+            elif isinstance(first_item, dict) and "text" in first_item:
+                raw_json_str = first_item["text"]
+            else:
+                raw_json_str = str(first_item) # Fallback
+        elif hasattr(targets_result, "text"):
+            raw_json_str = targets_result.text
         else:
-             targets_clean = str(targets_result)
+            raw_json_str = str(targets_result)
+
+        # 2. Parsing del JSON
+        # La stringa inizia con '{"activeTargets": ...}'
+        try:
+            data = json.loads(raw_json_str)
+            active_targets_raw = data.get("activeTargets", [])
+            
+            for t in active_targets_raw:
+                labels = t.get("labels", {})
+                # Cerchiamo il nome "umano" (es. worker-1)
+                name = labels.get("name")
+                
+                # Se non c'è "name", proviamo "instance" (es. IP:Port)
+                if not name:
+                    name = labels.get("instance")
+                
+                if name:
+                    unique_names.add(name) # Il set rimuove i doppi (mysql, node, ecc.)
+
+        except json.JSONDecodeError:
+            log.error(f"Errore parsing JSON interno targets: {raw_json_str[:50]}...")
+
+        # Convertiamo in lista ordinata per coerenza
+        targets_list = sorted(list(unique_names))
+        log.info(f"✅ Nodi unici identificati: {targets_list}")
              
     except Exception as e:
+        log.error(f"⛔ ERRORE GET TARGETS: {e}")
         return {
             "messages": [SystemMessage(content=f"⛔ ERRORE GET TARGETS: Impossibile recuperare i target attivi.\nDettagli: {str(e)}")],
-            "sanity_check_ok": False
+            "sanity_check_ok": False,
+            "active_targets": []
         }
 
     # 3. CARICAMENTO RISORSA 
-    # URI definito nel server.py
     TARGET_URI = "prometheus://qos/config"
     qos_config = {}
     
     try:
-        print(f"   ⬇️  Richiesta risorsa specifica: {TARGET_URI}")
+        log.info(f"⬇️  Richiesta risorsa specifica: [bold]{TARGET_URI}[/bold]")
         
-        # USIAMO LA SPECIFICA CHE HAI TROVATO:
-        # Passiamo 'uris' per chiedere solo quella specifica risorsa.
         resources = await client.get_resources(uris=TARGET_URI)
         
         if resources and len(resources) > 0:
-            # Se la lista non è vuota, il primo elemento è sicuramente quello richiesto.
-            # Non ci importa se resource.source è None, perché abbiamo filtrato a monte.
             config_blob = resources[0]
-            
             text_content = config_blob.as_string()
             qos_config = json.loads(text_content)
-            print(f"   ✅ Knowledge Base caricata: {len(qos_config.get('metrics', {}))} metriche.")
+            
+            num_metrics = len(qos_config.get('metrics', {}))
+            num_profiles = len(qos_config.get('profiles', {}))
+            log.info(f"✅ Knowledge Base caricata: [bold]{num_metrics}[/bold] metriche, [bold]{num_profiles}[/bold] profili.")
         else:
-            print(f"   ⚠️ Il server ha restituito una lista vuota per l'URI: {TARGET_URI}")
+            log.warning(f"⚠️ Il server ha restituito una lista vuota per l'URI: {TARGET_URI}")
             qos_config = {"metrics": {}, "profiles": {}}
 
     except Exception as e:
-        print(f"   ❌ Errore caricamento Risorse: {e}")
+        log.error(f"❌ Errore caricamento Risorse: {e}", exc_info=True)
         qos_config = {"metrics": {}, "profiles": {}}
         return {
             "qos_config": qos_config,
@@ -96,12 +141,13 @@ async def context_manager_node(state: AgentState):
 
     # Safety Check
     if not qos_config.get("profiles"):
+        log.warning("ATTENZIONE: Configurazione QoS vuota o profili mancanti.")
         msg = "ATTENZIONE: Configurazione QoS vuota. L'analisi capacità non funzionerà."
     else:
         msg = "System Ready. Knowledge Loaded via Resources."
 
     return {
-        "active_targets": targets_clean,
+        "active_targets": targets_list,
         "qos_config": qos_config,
         "sanity_check_ok": True,
         "messages": [SystemMessage(content=msg)]

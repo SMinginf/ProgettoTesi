@@ -11,7 +11,7 @@ class AgentState(TypedDict):
     # The Annotated type with operator.add ensures that new messages are appended to the existing list rather than replacing it.
     messages: Annotated[list[AnyMessage], operator.add] # Storia della chat
 
-    #active_targets: str        # Lista dei target attivi (es. "node-exporter, mysql")
+    active_targets: List[str]        # Lista dei target attivi
     #retry_count: int           # Contatore per i tentativi di correzione
     #last_error: str            # Ultimo errore riscontrato (per il Refiner)
     sanity_check_ok: bool

@@ -17,7 +17,7 @@ def map_profiles(state: AgentState):
     raw_profiles = config.get("profiles", [])
     metrics = state.get("metrics_report")
     
-    # 1. Recupero contesto decisionale (già popolato dall'intent_classifier a monte)
+    # 1. Recupero contesto decisionale (già popolato dall'task_classifier a monte)
     target_profiles = state.get("target_profiles", [])
     intent = state.get("intent", "status") 
 
@@ -81,7 +81,7 @@ def route_after_metrics(state: AgentState):
     
     if intent == "allocation":
         # Andiamo al nodo di classificazione tecnica
-        return "intent_classifier"
+        return "task_classifier"
     else:
         # SHORTCUT: Saltiamo il classifier e avviamo direttamente i worker (Map-Reduce)
         # Nota: Qui chiamiamo direttamente la funzione map_profiles per generare i Send()
@@ -109,7 +109,7 @@ async def build_graph():
     workflow.add_node("context", setup.context_manager_node)
     workflow.add_node("classifier", decision.classify_intent_node) 
     workflow.add_node("metrics_engine", retrieval.metrics_engine_node)
-    workflow.add_node("intent_classifier", decision.intent_classifier_node) 
+    workflow.add_node("task_classifier", decision.classify_task_node) 
 
     # NUOVO: Registriamo il nodo chat
     #workflow.add_node("conversational", decision.conversational_node)
@@ -149,17 +149,17 @@ async def build_graph():
     
     # --- BIVIO STRATEGICO (La correzione) ---
     # Dopo le metriche, controlliamo l'intento.
-    # Possiamo andare al nodo "intent_classifier" OPPURE direttamente ai nodi "single_profile_evaluator" (via Send)
+    # Possiamo andare al nodo "task_classifier" OPPURE direttamente ai nodi "single_profile_evaluator" (via Send)
     workflow.add_conditional_edges(
         "metrics_engine",
         route_after_metrics, 
-        ["intent_classifier", "single_profile_evaluator"]
+        ["task_classifier", "single_profile_evaluator"]
     )
     
     # --- RAMO ALLOCATION (Step intermedio) ---
-    # Se siamo passati dall'intent_classifier, ORA lanciamo il Map-Reduce (filtrato)
+    # Se siamo passati dall'task_classifier, ORA lanciamo il Map-Reduce (filtrato)
     workflow.add_conditional_edges(
-        "intent_classifier",
+        "task_classifier",
         map_profiles, 
         ["single_profile_evaluator"]
     )

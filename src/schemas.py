@@ -1,4 +1,4 @@
-from typing import List, Dict, Literal, TypedDict
+from typing import List, Dict, Literal, Optional, TypedDict
 from pydantic import BaseModel, Field
 
 # --- SCHEMI DI OUTPUT STRUTTURATO ---
@@ -23,9 +23,18 @@ class CapabilityReport(BaseModel):
     final_synthesis: str = Field(description="Sintesi finale. Quali nodi sono idonei per quali profili, raccomandazioni generali.")
 
 
-class UserRequestClassification(TypedDict):
+class UserRequestClassification(BaseModel):
     intent: Literal["allocation", "status"]            
-    target_filter: None | str     # None (tutti) oppure "server-alpha" (singolo server)
+    target_filter: Optional[str] = Field(
+        default=None, 
+        description="Il nome del server specifico se menzionato, altrimenti None."
+    )
+
+
+# class UserRequestClassification(TypedDict):
+#     intent: Literal["allocation", "status"]            # "allocation" oppure "status"
+#     target_filter: None | str     # None (tutti) oppure "server-lpha" (singolo server)
+
 
 class SingleProfileCheck(BaseModel):
     """Output atomico per un singolo profilo."""
