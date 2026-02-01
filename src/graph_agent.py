@@ -1,30 +1,5 @@
-import json
-import asyncio
-from dotenv import load_dotenv
-
-
-from langchain.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.types import Send
-
-
-
-# --- IMPORT PER LA GRAFICA ---
-from src.config import console
-from rich.panel import Panel
-from rich.markdown import Markdown
-
-
-
-
-
-load_dotenv()
-
-
-
-
-
-import json
 
 from .state import AgentState
 from .nodes import setup, retrieval, analysis, decision, reporting
@@ -82,7 +57,19 @@ def map_profiles(state: AgentState):
         }) 
         for p in profiles_to_scan
     ]
-  
+
+# 1. Definiamo la funzione di routing iniziale
+def route_initial_intent(state):
+    """
+    Decide se avviare il motore tecnico o rimanere in chat.
+    """
+    intent = state.get("intent", "chat")
+    
+    if intent == "chat":
+        return "conversational" # Bypassiamo tutto il setup tecnico
+    else:
+        return "context"   # Avviamo il setup (health check, config load)
+
 
 def route_after_metrics(state: AgentState):
     """
@@ -123,6 +110,9 @@ async def build_graph():
     workflow.add_node("classifier", decision.classify_intent_node) 
     workflow.add_node("metrics_engine", retrieval.metrics_engine_node)
     workflow.add_node("intent_classifier", decision.intent_classifier_node) 
+
+    # NUOVO: Registriamo il nodo chat
+    #workflow.add_node("conversational", decision.conversational_node)
     
     # Nodi Ramo Status
     workflow.add_node("single_profile_evaluator", analysis.single_profile_evaluator_node)
@@ -137,9 +127,25 @@ async def build_graph():
     # --- 2. DEFINIZIONE ARCHI ---
     
     # Setup Iniziale
+
     workflow.set_entry_point("context")
     workflow.add_edge("context", "classifier")
     workflow.add_edge("classifier", "metrics_engine")
+
+    #workflow.set_entry_point("classifier")
+    # workflow.add_conditional_edges(
+    #     "classifier",
+    #     route_initial_intent,
+    #     {
+    #         "conversational": "conversational", # Via veloce
+    #         "context": "context"      # Via tecnica
+    #     }
+    # )
+
+    #workflow.add_edge("context", "metrics_engine")
+
+    # Chiudi il ramo chat
+    #workflow.add_edge("conversational", END)
     
     # --- BIVIO STRATEGICO (La correzione) ---
     # Dopo le metriche, controlliamo l'intento.

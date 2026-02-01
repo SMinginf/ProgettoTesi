@@ -18,7 +18,7 @@ class AgentState(TypedDict):
 
     # Dati strutturati raccolti
     metrics_report: str                                # Il risultato delle query in formato JSON strutturato
-    intent: Literal["allocation", "status"]            # "allocation" oppure "status"
+    intent: Literal["allocation", "status"]            
 
     qos_config: dict            # <--- Qui salviamo il JSON scaricato dal Server MCP
     target_filter: None | str        # None (tutti) oppure "server-lpha" (singolo server)

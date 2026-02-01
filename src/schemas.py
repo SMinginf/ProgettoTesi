@@ -24,8 +24,8 @@ class CapabilityReport(BaseModel):
 
 
 class UserRequestClassification(TypedDict):
-    intent: Literal["allocation", "status"]            # "allocation" oppure "status"
-    target_filter: None | str     # None (tutti) oppure "server-lpha" (singolo server)
+    intent: Literal["allocation", "status"]            
+    target_filter: None | str     # None (tutti) oppure "server-alpha" (singolo server)
 
 class SingleProfileCheck(BaseModel):
     """Output atomico per un singolo profilo."""

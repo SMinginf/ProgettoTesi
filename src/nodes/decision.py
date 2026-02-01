@@ -17,13 +17,17 @@ async def classify_intent_node(state: AgentState):
     Analizza l'input utente e determina l'intento: "allocation" o "status".
     Inoltre, estrae un filtro target se specificato (es. nome server).  
     """
-    user_input = state["messages"][0].content
+    user_input = state["messages"][-1].content
 
     
     prompt = f"""
-    Analizza la seguente richiesta e classificala: "{user_input}"
+    Analizza la seguente richiesta utente: "{user_input}"
     
-    Restituisci l'intento e inserisci in "target_filter" il nome del server specifico se menzionato, altrimenti non inserire nulla. 
+    CLASSIFICAZIONE INTENTO:
+    1. "allocation": Se l'utente vuole trovare risorse, deployare, cerca un server adatto.
+    2. "status": Se l'utente chiede lo stato, la salute, le metriche attuali dei server.
+    
+    Restituisci l'intento e inserisci in "target_filter" il nome del server specifico se menzionato.
     """
     structured_llm = llm.with_structured_output(UserRequestClassification)
     response = await structured_llm.ainvoke(prompt)
@@ -32,17 +36,11 @@ async def classify_intent_node(state: AgentState):
     intent = response['intent']
     target = response['target_filter']
     
-    # STAMPA MIGLIORATA
-    color = "green" if intent == "allocation" else "blue"
-    icon = "🚀" if intent == "allocation" else "📋"
+    # Stampa di debug/estetica
+    color_map = {"allocation": "green", "status": "blue", "chat": "white"}
+    color = color_map.get(intent, "white")
     
-    msg = f"Intent rilevato: [bold {color}]{intent.upper()}[/bold {color}]\n"
-    if target:
-        msg += f"Target specifico: [bold]{target}[/bold]"
-    else:
-        msg += "Ambito: [italic]Intero Cluster[/italic]"
-        
-    console.print(Panel(msg, title=f"{icon} Intent Classifier", border_style=color))
+    console.print(Panel(f"Intent rilevato: [bold {color}]{intent.upper()}[/bold {color}]", title="Intent Classifier", border_style=color))
 
     return {"intent": intent, "target_filter": target}
 
@@ -652,3 +650,23 @@ async def allocation_advisor_node_llm(state: AgentState):
     response = await llm.ainvoke(state["messages"] + [HumanMessage(content=prompt)])
     
     return {"messages": [response]}
+
+# async def conversational_node(state: AgentState):
+#     """
+#     Gestisce la conversazione 'umana'. 
+#     Non usa tool, legge solo la history dei messaggi nello 'state' e risponde.
+#     """
+#     console.print("[italic dim]💬 Generazione risposta conversazionale...[/italic dim]")
+    
+#     # Passiamo tutta la storia dei messaggi all'LLM. 
+#     # L'LLM vedrà le tabelle e i report generati nei turni precedenti.
+#     response = await llm.ainvoke(state["messages"])
+
+#     console.print(Panel(
+#         response.content, 
+#         title="💬 Assistant", 
+#         border_style="white",
+#         expand=False # Evita che il pannello occupi tutta la larghezza se il testo è breve
+#     ))
+    
+#     return {"messages": [response]}
