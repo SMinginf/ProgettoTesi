@@ -16,7 +16,7 @@ from src.logger import log
 async def classify_intent_node(state: AgentState):
     """
     Analizza l'input utente e determina l'intento: "allocation" o "status".
-    Inoltre, estrae un filtro target se specificato (es. nome server).  
+    Se l'utente specifica un nodo particolare, lo estrae e lo assegna a "target_filter".
     """
     user_input = get_last_user_message(state["messages"])
 
@@ -43,17 +43,17 @@ async def classify_intent_node(state: AgentState):
         
         intent = response.intent
         target = response.target_filter
-
-               
+                
         if target and target.lower() in ["nessuno", "none", "null", "n/a", "tutti", "all"]:
             target = None
 
-        # LOGGING
-        log.info(f"🧠 Classificazione intento: [bold magenta]{intent}[/bold magenta]")
+        # 1. Visualizzazione per l'utente
+        console.print(f"🧠 Classificazione intento: [bold magenta]{intent}[/bold magenta]")
         if target:
-            log.info(f"🎯 Target: [bold]{target}[/bold]")
+            console.print(f"🎯 Target: [bold cyan]{target}[/bold cyan]")
 
-        
+        # 2. Log di sistema
+        log.info(f"Classificazione intento: {intent} | Target: {target}")
 
     except Exception as e:
         log.error(f"Errore classificazione intento: {e}")
@@ -62,22 +62,22 @@ async def classify_intent_node(state: AgentState):
     
     return {"intent": intent, "target_filter": target}
 
-
 async def classify_task_node(state: AgentState):
     """
-    Step 1: Capire la natura del task (CPU vs RAM vs Disk).
-    Non si preoccupa dei numeri specifici.
+    Analizza la descrizione del task utente e identifica i profili di carico più adatti.
+    1. Usa la configurazione QoS per recuperare i profili disponibili.
+    2. Costruisce un prompt che elenca i profili con le loro descrizioni.
+    3. Chiede all'LLM di selezionare i profili più rilevanti per il task descritto.
+    4. Registra la selezione e la motivazione nello stato.
+
     """
     user_input = get_last_user_message(state["messages"])
-            
-    # Debug opzionale per vedere cosa sta leggendo
-    # print(f"DEBUG: Analyzing User Input: {user_input}")
 
     config = state.get("qos_config", {})
     profiles = config.get("profiles", {})
     
-    # Passiamo SOLO "description". La key_label sarà il nome del profilo.
-    # Escludiamo "required_conditions" e "scoring_weights" che confondono l'LLM.
+    # Passo SOLO "description". La key_label sarà il nome del profilo.
+    # Escludmo "required_conditions" e "scoring_weights" per evitare di confondere l'LLM.
     profiles_table = json_to_markdown_table(
         profiles, 
         key_label="Profile Name", 
@@ -104,43 +104,47 @@ async def classify_task_node(state: AgentState):
     sel_profiles = result.selected_profiles
     reason = result.reasoning
     
-    log.info(Panel(
+    # 1. Visualizzazione per l'utente
+    console.print(Panel(
         f"Task mappato su: [bold magenta]{sel_profiles}[/bold magenta]\n[italic dim]\"{reason}\"[/italic dim]",
         title="🧠 Technical Profiler",
         border_style="magenta"
     ))
     
+    # 2. Log di sistema
+    log.info(f"Task profile classification: {sel_profiles} | Reason: {reason}")
     
     return {
         "target_profiles": sel_profiles,
         "classification_reason": reason
     }
 
-
 async def constraint_extractor_node(state: AgentState):
     """
-    Step 2: Estrarre numeri e convertirli in vincoli Prometheus validi.
+    Estrae i vincoli numerici espliciti dalla richiesta utente.
+    1. Usa le metriche disponibili nella configurazione QoS per guidare l'estrazione.
+    2. Restituisce una lista di vincoli strutturati nello stato.
+
     """
-    # --- Recupero ultimo messaggio umano ---
+    # --- Recupero ultimo messaggio utente ---
     user_input = get_last_user_message(state["messages"])
 
     config = state.get("qos_config", {})
     metrics = config.get("metrics", {})
     
-
-    # Chiediamo SOLO le colonne utili per capire il significato della metrica.
+    # Estraggo SOLO le colonne utili per capire il significato della metrica.
     # La colonna 'query' verrà ignorata automaticamente.
     metrics_table = json_to_markdown_table(
         metrics, 
         key_label="Metric", 
-        columns=["unit", "description"] # <--- ECCO LA MAGIA
+        columns=["unit", "description"] 
     )
-
     
     prompt = f"""
     SEI UN ESTRATTORE DI VINCOLI TECNICI.
     
     Il tuo unico obiettivo è trovare numeri e requisiti nella richiesta e convertirli in filtri per metriche.
+    Se non sono presenti numeri espliciti, restituisci una lista vuota.
     
     METRICHE DISPONIBILI:
     {metrics_table}
@@ -149,10 +153,10 @@ async def constraint_extractor_node(state: AgentState):
     
     REGOLE DI CONVERSIONE:
     1. RAM/DISK (Bytes):
-       - 1KB = 1024, 1MB = 1024^2, 1GB = 1024^3.
-       - Es: "4GB RAM libera" -> metrica: `ram_available_bytes`, val: 4294967296, op: `>=`
+        - 1KB = 1024, 1MB = 1024^2, 1GB = 1024^3.
+        - Es: "4GB RAM libera" -> metrica: `ram_available_bytes`, val: 4294967296, op: `>=`
     2. PERCENTUALI (0-100):
-       - Es: "CPU sotto il 20%" -> metrica: `cpu_usage_pct`, val: 20, op: `<`
+        - Es: "CPU sotto il 20%" -> metrica: `cpu_usage_pct`, val: 20, op: `<`
     3. Se non ci sono numeri espliciti, restituisci una lista vuota.
     """
     
@@ -160,174 +164,180 @@ async def constraint_extractor_node(state: AgentState):
     try:
         result = await model.ainvoke(prompt)
         
-        # STAMPA MIGLIORATA
-
         # Serializziamo per salvare nello stato (Pydantic -> Dict)
         constraints_list = [c.model_dump() for c in result.constraints]
     
         if constraints_list:
+            # 1. Visualizzazione per l'utente
             c_text = "\n".join([f"- [bold]{c['metric_name']}[/bold] {c['operator']} {c['value']} ({c['original_text']})" for c in constraints_list])
-            log.info(Panel(c_text, title="📏 Vincoli Estratti", border_style="yellow"))
+            console.print(Panel(c_text, title="📏 Vincoli Estratti", border_style="yellow"))
+            
+            # 2. Log di sistema 
+            # Loggo la lista grezza, utile per debuggare i valori esatti
+            log.info(f"Vincoli numerici estratti: {constraints_list}")
         else:
-            log.info("ℹ️  Nessun vincolo numerico esplicito trovato.")
+            # 1. Utente
+            console.print("Nessun vincolo numerico esplicito trovato.", style="dim")
+            # 2. Log
+            log.info("Nessun vincolo numerico esplicito trovato.")
         
         return {"explicit_constraints": constraints_list}
         
-    except Exception:
+    except Exception as e:
+        log.error(f"Errore durante l'estrazione dei vincoli: {e}")
         return {"explicit_constraints": []}
-
 
 async def candidate_filter_node(state: AgentState):
     """
-    FILTRO CANDIDATI (The Funnel).
-    
-    Questo nodo riceve:
-    1. I risultati tecnici di TUTTI i profili (dal Map-Reduce 'single_profile_evaluator').
-    2. L'intenzione dell'utente (da 'task_classifier').
-    3. I vincoli espliciti (da 'constraint_extractor').
-    
-    Obiettivo: Trovare l'intersezione dei nodi che soddisfano TUTTO.
+    Filtra i nodi candidati basandosi su:
+    1. Profili di carico tecnici (intersezione dei nodi qualificati).
+    2. Vincoli espliciti dell'utente (es. RAM minima).
+    Restituisce la lista finale dei nodi che soddisfano tutti i criteri.
+
     """
     
-    # --- 1. RECUPERO DATI DALLO STATO ---
-    
-    # A. I profili che l'utente vuole (es. ["cpu-bound", "memory-bound"])
+    # --- RECUPERO DATI DALLO STATO ---
     target_profiles = state.get("target_profiles", [])
-    
-    # B. I report tecnici generati dai worker paralleli
-    # Lista di stringhe JSON: [{"profile_name": "cpu-bound", "qualified_nodes": ["w1", "w2"]}, ...]
     raw_results = state.get("profile_results", [])
-    
-    # C. Vincoli espliciti (es. RAM > 8GB)
     user_constraints = state.get("explicit_constraints", [])
-    
-    # D. Dati metrici grezzi (necessari per controllare i vincoli numerici)
     metrics_json = state.get("metrics_report", "{}")
+    
     try:
         metrics_data = json.loads(metrics_json) # Dict: {"worker-1": {"cpu": 10...}, ...}
     except:
         metrics_data = {}
 
-    log.info(Panel("🌪️ Filtering Candidates", style="grey50"))
+    console.print(Panel("🌪️ Filtering Candidates", style="grey50"))
+    log.info("Avvio filtro candidati (Candidate Filter Node).")
 
-    # --- FASE 1: FILTRO PER PROFILO (Capability Intersection) ---
-    # Logica: Se l'utente vuole CPU e RAM, il nodo deve essere idoneo per ENTRAMBI.
+    # --- FASE 1: FILTRO PER PROFILO  ---
     
-    # Parsiamo i risultati del Map-Reduce in un dizionario per accesso rapido
-    # Structure: {"cpu-bound": {"w1", "w2"}, "disk-bound": {"w1"}}
-    profile_qualification_map = {}
+    # Parsing dei risultati del Map-Reduce
+    profile_qualification_map = {} # profile_name -> set(nodi qualificati)
     for r_str in raw_results:
         try:
             r_dict = json.loads(r_str)
             p_name = r_dict.get("profile_name")
-            q_nodes = set(r_dict.get("qualified_nodes", [])) # Usiamo set per intersezioni
+            q_nodes = set(r_dict.get("qualified_nodes", [])) 
             profile_qualification_map[p_name] = q_nodes
         except:
             continue
 
     # Calcolo dei candidati iniziali
-    initial_candidates = set()
+    initial_candidates = set() # uso un set così da evitare duplicati
     
     if not target_profiles:
-        # Caso: L'utente non ha specificato un profilo (richiesta generica)
-        # O il classificatore ha fallito. Consideriamo TUTTI i nodi che hanno superato almeno un test.
-        log.warning("⚠️ Nessun profilo target specifico. Considero tutti i nodi tecnicamente validi.")
+        # Caso: Nessun profilo specifico
+        msg = "⚠️ Nessun profilo target specifico. Considero tutti i nodi tecnicamente validi."
+        console.print(msg, style="yellow")
+        log.warning(msg)
+        
+        # Considero tutti i nodi qualificati da ogni profilo
         for nodes_set in profile_qualification_map.values():
             initial_candidates.update(nodes_set)
     else:
-        # Caso: L'utente vuole specifici profili (Intersezione)
-        # Inizializziamo con i nodi del primo profilo target
+        # Caso: Intersezione profili richiesti
         first_prof = target_profiles[0]
         if first_prof in profile_qualification_map:
             initial_candidates = set(profile_qualification_map[first_prof])
-            log.info(f"Base candidati ({first_prof}): {len(initial_candidates)} nodi.")
+            
+            msg = f"Candidati per il profilo ({first_prof}): {len(initial_candidates)} nodi."
+            console.print(msg)
+            log.info(msg)
         else:
-            log.error(f"❌ Errore: Nessun risultato tecnico per il profilo {first_prof}")
-            # Se manca il primo profilo, l'intersezione sarà vuota
+            msg = f"❌ Errore: Nessun risultato tecnico per il profilo {first_prof}"
+            console.print(msg, style="bold red")
+            log.error(msg)
             initial_candidates = set()
 
-        # Intersezione con gli altri profili target (se ce ne sono altri)
+        # Intersezione con gli altri profili
         for p_name in target_profiles[1:]:
             p_nodes = profile_qualification_map.get(p_name, set())
             prev_count = len(initial_candidates)
             initial_candidates.intersection_update(p_nodes)
-            log.info(f"Intersezione con {p_name}: {prev_count} -> {len(initial_candidates)} nodi.")
-    # --- FASE 2: FILTRO PER VINCOLI UTENTE (Explicit Constraints) ---
-    # Logica: Applicare le regole matematiche (es. ram > 8GB)
-    
+            
+            msg = f"Intersezione con {p_name}: {prev_count} -> {len(initial_candidates)} nodi."
+            console.print(msg)
+            log.info(msg)
+
+    # --- FASE 2: FILTRO PER VINCOLI UTENTE ---
     final_candidates = list(initial_candidates)
     
     if user_constraints and final_candidates:
-        log.info(f"Applicazione {len(user_constraints)} vincoli esplicitati dall'utente...")
+        msg = f"Applicazione di {len(user_constraints)} vincoli esplicitati dall'utente..."
+        console.print(msg)
+        log.info(msg)
 
-        # Mappa stringa -> funzione operatore
+        # Mappa degli operatori
         ops = {
             ">": operator.gt, "<": operator.lt,
             ">=": operator.ge, "<=": operator.le,
             "==": operator.eq, "!=": operator.ne
         }
         
-        # Iteriamo su una COPIA della lista per poter rimuovere elementi in sicurezza
+        # Ciclo sui nodi candidati
         for node in list(final_candidates):
+
+            # Per ogni nodo prendo le sue metriche...
             node_metrics = metrics_data.get(node, {})
             
+            # ... e ciclo sui vincoli utente
             for constr in user_constraints:
                 metric_key = constr["metric_name"]
                 target_val = constr["value"]
                 op_sym = constr["operator"]
                 op_func = ops.get(op_sym)
                 
-                # Recuperiamo il valore reale dal nodo
                 real_val = node_metrics.get(metric_key)
                 
-                # Check 1: La metrica esiste?
+                # Check 1: verifica esistenza della metrica per il nodo
                 if real_val is None:
-                    log.info(f"[dim red]   - {node} scartato: Manca dato {metric_key}[/dim red]")
+                    console.print(f"[dim red]   - {node} scartato: Manca dato {metric_key}[/dim red]")
+                    log.info(f"Node {node} scartato: Manca dato {metric_key}")
                     if node in final_candidates: final_candidates.remove(node)
                     break 
                 
-                # Check 2: Il valore rispetta la soglia?
+                # Check 2: verifica soglia. Se fallisce, scarta il nodo
                 if op_func and not op_func(real_val, target_val):
-                    log.info(f"[dim red]   - {node} scartato: {metric_key}={real_val} non è {op_sym} {target_val}[/dim red]")
+                    console.print(f"[dim red]   - {node} scartato: {metric_key}={real_val} non è {op_sym} {target_val}[/dim red]")
+                    log.info(f"Node {node} scartato: {metric_key}={real_val} failed constraint {op_sym} {target_val}")
                     if node in final_candidates: final_candidates.remove(node)
-                    break # Nodo scartato, inutile controllare altri vincoli
+                    break 
 
     # --- OUPUT FINALE ---
-    
-    # STAMPA FINALE DEL NODO
     if final_candidates:
-        log.info(f"[green]   ✅ Finalisti:[/green] [bold]{', '.join(final_candidates)}[/bold]")
+        # Visuale
+        console.print(f"[green]   ✅ Finalisti:[/green] [bold]{', '.join(final_candidates)}[/bold]")
+        # Log
+        log.info(f"Finalisti identificati: {final_candidates}")
     else:
-        log.warning("[bold red]   ⛔ Nessun candidato sopravvissuto ai filtri.[/bold red]")
+        # Visuale
+        console.print("   ⛔ Nessun candidato sopravvissuto ai filtri.", style="bold red")
+        # Log
+        log.warning("Nessun candidato sopravvissuto ai filtri.")
 
-    # Salviamo nello stato per l'Advisor successivo
     return {"final_candidates": final_candidates}
 
 async def allocation_advisor_node(state: AgentState):
     """
-    DECISION ENGINE (LOGICA SRE AVANZATA).
-    
-    Questo è il "Cervello" decisionale dell'agente.
-    Non si limita a guardare chi ha più RAM libera. Incrocia due dimensioni:
-    1. PERFORMANCE (Score 0-1): Chi è più potente ADESSO.
-    2. STABILITÀ (Risk Flags): Chi è stato affidabile nelle ULTIME 24H.
-    
-    Novità principale: "RESCUE SCAN".
-    Se i nodi più potenti sono instabili, l'algoritmo scorre la classifica 
-    verso il basso per trovare un "Porto Sicuro" (Safe Haven).
+    Nodo principale per consigliare l'allocazione sul nodo migliore.
+    1. Recupera i candidati finali e le metriche dallo stato.
+    2. Calcola uno score di performance per ogni nodo basato sui pesi dei profili target.
+    3. Valuta il rischio di instabilità basato sui dati di stabilità.
+    4. Classifica i nodi e identifica il vincitore, il runner-up e un "porto sicuro" se disponibile.
+    5. Costruisce un prompt dinamico basato sulla strategia di selezione
+         (es. clear winner, consider runner-up, propose safe haven, all risky).
+    6. Invoca l'LLM per generare la raccomandazione finale per l'utente.
+
     """
+    
     
     # --- 0. RECUPERO CONTESTO DALLO STATO ---
     candidates = state.get("final_candidates", [])
     target_profiles = state.get("target_profiles", [])
-    
-    # Report grezzo delle metriche attuali (snapshot istantaneo)
     metrics_json = state.get("metrics_report", "{}")
-    
-    # Report di stabilità generato dal nodo precedente (contiene le etichette SPIKE, CHAOTIC)
     stability_data = state.get("stability_report", {}) 
     
-    # Configurazioni generali
     config = state.get("qos_config", {})
     profiles_def = config.get("profiles", {})
     
@@ -336,35 +346,43 @@ async def allocation_advisor_node(state: AgentState):
     except:
         metrics_data = {}
 
-    log.info(Panel("🚀 Allocation Advisor (Deep Scan)", style="grey50"))
+
+    console.print(Panel("🚀 Allocation Advisor (Deep Scan)", style="grey50"))
+    log.info("Avvio Allocation Advisor.")
 
     if not candidates:
-        return {"messages": [AIMessage(content="❌ Nessun nodo idoneo trovato.")]}
+        msg = "❌ Nessun nodo idoneo trovato."
+        console.print(msg, style="bold red")
+        return {"messages": [AIMessage(content=msg)]}
     
     # --- FASE 1: PREPARAZIONE PESI (WEIGHT MIXING) ---
-    # Determiniamo quali metriche contano per questa decisione.
-    # Se l'utente non ha specificato profili, usiamo la CPU come default.
-    
     active_weights = {}
+
+    # Caso: Nessun profilo specifico, usiamo peso di default su CPU
     if not target_profiles:
         active_weights = {"cpu_usage_pct": {"weight": 1.0, "direction": "minimize"}}
     else:
-        # Se ci sono più profili (es. CPU + DISK), fondiamo i pesi.
-        # Logica: "Max Weight Wins". Se per un profilo la CPU pesa 0.9 e per l'altro 0.1,
-        # nel computo totale peserà 0.9 (è critica).
+
+        # Per ogni profilo target prendo i pesi delle sue metriche 
         for p_name in target_profiles:
             p_weights = profiles_def.get(p_name, {}).get("scoring_weights", {})
+
+            # Mixaggio pesi
             for metric, info in p_weights.items():
+
+                # Se la metrica non esiste, la aggiungo
                 if metric not in active_weights:
                     active_weights[metric] = info
                 else:
+                    # Se esiste (ovvero più profili target la usano), prendo il peso più alto
                     if info["weight"] > active_weights[metric]["weight"]:
                         active_weights[metric] = info
     
-    # Normalizzazione: La somma dei pesi deve fare 1.0 per avere uno score coerente (0-100%)
+    # Normalizzazione pesi
     total_weight_sum = sum(info["weight"] for info in active_weights.values())
-    normalized_weights_map = {}
+    normalized_weights_map = {} # Dict {nome_metrica -> {"weight": float, "direction": str, "stability_threshold": float}, ...}
     if total_weight_sum > 0:
+        # Caso in cui ci sono più profili target
         for metric, info in active_weights.items():
             new_info = info.copy()
             new_info["weight"] = info["weight"] / total_weight_sum
@@ -373,19 +391,19 @@ async def allocation_advisor_node(state: AgentState):
         normalized_weights_map = active_weights
 
     # --- FASE 2: CALCOLO SCORE & RISK ASSESSMENT ---
-    # Qui costruiamo la classifica.
-    
     node_perf_scores = {n: 0.0 for n in candidates}
-    node_risks = {n: [] for n in candidates} # Lista dei problemi rilevati per ogni nodo
+    node_risks = {n: [] for n in candidates} 
 
-    for metric_name, info in normalized_weights_map.items():
+    for metric_name, info in normalized_weights_map.items(): 
+        # Inizio il calcolo degli score per questa metrica dei vari nodi candidati
+
         weight = info.get("weight", 0)
-        direction = info.get("direction", "minimize") # minimize (CPU) o maximize (RAM Free)
+        direction = info.get("direction", "minimize")
         
-        # A. Raccogliamo tutti i valori per capire il range (Min-Max)
-        values = []
+        values = [] # conterrà i valori di quella metrica per ogni nodo candidato
         valid_nodes = []
         for node in candidates:
+            # Raccolgo per ogni nodo candidato il valore della metrica di interesse
             val = metrics_data.get(node, {}).get(metric_name)
             if val is not None:
                 values.append(float(val))
@@ -393,88 +411,76 @@ async def allocation_advisor_node(state: AgentState):
         
         if not values: continue
 
+        # Normalizzazione valori MIN-MAX 
+        # Questo mi permette di confrontare metriche con scale e unità di misura diverse
         min_v, max_v = min(values), max(values)
-        spread = max_v - min_v # Ampiezza del range
+        spread = max_v - min_v 
+
+        # Calcolo score -> 
+        # - metric_score = (MAX - val) / spread  (se minimize)
+        # - metric_score = (val - MIN) / spread  (se maximize)
         
-        # B. Calcoliamo il punteggio per ogni nodo su questa specifica metrica
         for node in valid_nodes:
             raw_val = float(metrics_data.get(node, {}).get(metric_name))
             
-            # Normalizzazione Min-Max (Scala 0.0 - 1.0)
-            # Ci permette di sommare pere (GB) con mele (%)
-            perf_score = 0.0
+            metric_score = 0.0
             if spread == 0: 
-                perf_score = 1.0 # Tutti i nodi sono uguali
+                metric_score = 1.0 
             else:
                 if direction == "minimize":
-                    # Migliore se più basso (es. CPU Usage): (Max - Val) / Spread
-                    perf_score = (max_v - raw_val) / spread
+                    metric_score = (max_v - raw_val) / spread
                 else:
-                    # Migliore se più alto (es. RAM Available): (Val - Min) / Spread
-                    perf_score = (raw_val - min_v) / spread
+                    metric_score = (raw_val - min_v) / spread
             
-            # Aggiungiamo al punteggio totale pesato del nodo
-            node_perf_scores[node] += (perf_score * weight)
+            # Raccolgo qui gli score parziali una metrica alla volta per ogni nodo candidato
+            node_perf_scores[node] += (metric_score * weight)
 
-            # C. Risk Check (Controllo Etichette di Stabilità)
-            # Non ricalcoliamo nulla. Leggiamo solo se il nodo precedente ha messo un flag "SPIKE" o "CHAOTIC".
+            # Recupero le info sulla stabilità della metrica per questo nodo
             stab_info = stability_data.get(node, {}).get(metric_name, {})
             status = stab_info.get("status", "UNKNOWN")
             
             if status in ["SPIKE", "CHAOTIC", "DRIFT"]:
-                reason = stab_info.get("reason", "")
-                # Loggiamo il rischio: "cpu_usage: CHAOTIC"
                 node_risks[node].append(f"{metric_name}: {status}")
 
-    # --- FASE 3: RANKING & RESCUE SCAN (IL CUORE SRE) ---
-    
-    # 1. Ordinamento puramente meritocratico (per performance)
+    # --- FASE 3: RANKING & RESCUE SCAN ---
     ranked_nodes = sorted(node_perf_scores.items(), key=lambda x: x[1], reverse=True)
     
     winner = ranked_nodes[0][0]
-    # Gestione caso lista con 1 solo elemento
     runner_up = ranked_nodes[1][0] if len(ranked_nodes) > 1 else None
     
-    # 2. "Rescue Scan": Cerchiamo il Safe Haven (Porto Sicuro)
-    # Scorriamo la classifica dal primo all'ultimo. Il primo che NON ha rischi è il nostro salvagente.
     safe_haven_node = None
     for node, score in ranked_nodes:
-        if not node_risks[node]: # Se la lista rischi è vuota (STABILE)
+        if not node_risks[node]: 
+            # Primo nodo che non ha rischi di instabilità su nessuna metrica in ordine di classifica
             safe_haven_node = node
-            break # Trovato! Non serve scendere oltre (è il migliore tra i sicuri)
+            break 
             
-    # --- FASE 4: DEFINIZIONE STRATEGIA (COSA DIRE ALL'LLM?) ---
-    # L'LLM non deve decidere, deve solo spiegare la nostra decisione.
-    
+    # --- FASE 4: DEFINIZIONE STRATEGIA ---
     strategy = "STANDARD"
-    candidates_to_show = [winner] # Di base mostriamo sempre il vincitore
+    candidates_to_show = [winner]
+    if runner_up:
+        candidates_to_show.append(runner_up) 
 
+    # Controllo se il nodo vincitore ha metriche non stabili
     winner_is_safe = (len(node_risks[winner]) == 0)
     
     if winner_is_safe:
-        # SCENARIO A: Tutto perfetto. Il più potente è anche stabile.
+        # Se il winner non ha nessuna metrica instabile, strategia CLEAR_WINNER
         strategy = "CLEAR_WINNER"
-        if runner_up: candidates_to_show.append(runner_up)
     
-    else:
-        # Il vincitore ha dei problemi. Dobbiamo valutare le alternative.
-        if safe_haven_node:
-            if safe_haven_node == runner_up:
-                # SCENARIO B: Il secondo classificato è il porto sicuro.
-                # Conflitto classico: "Vuoi potenza (Winner) o sicurezza (Runner-up)?"
-                strategy = "CONSIDER_RUNNER_UP"
-                candidates_to_show.append(runner_up)
-            else:
-                # SCENARIO C (CRITICO): Il porto sicuro è nascosto in basso (es. 3° o 4° posto).
-                # Dobbiamo forzare la mano e mostrare questo terzo candidato.
-                strategy = "PROPOSE_SAFE_HAVEN"
-                if runner_up: candidates_to_show.append(runner_up)
-                candidates_to_show.append(safe_haven_node) # Aggiungiamo esplicitamente il Safe Haven
+    elif safe_haven_node:
+        # Se il winner non è safe, ma abbiamo un porto sicuro
+        if safe_haven_node == runner_up:
+            strategy = "CONSIDER_RUNNER_UP"
+            # Nota: runner_up è già stato aggiunto al punto 2
         else:
-            # SCENARIO D: Nessun nodo è stabile. Siamo nei guai.
-            # Consigliamo il meno peggio (Winner) ma con forti warning.
-            strategy = "ALL_RISKY"
-            if runner_up: candidates_to_show.append(runner_up)
+            strategy = "PROPOSE_SAFE_HAVEN"
+            # Unica eccezione: qui dobbiamo aggiungere un terzo nodo
+            candidates_to_show.append(safe_haven_node)
+
+    else:
+        # Nessun nodo è safe
+        strategy = "ALL_RISKY"
 
     # --- LOGGING VISIVO (CONSOLE) ---
     table = Table(title="🏆 Ranking & Rescue Scan", show_header=True, header_style="bold magenta")
@@ -485,40 +491,38 @@ async def allocation_advisor_node(state: AgentState):
     
     for i, (node, score) in enumerate(ranked_nodes, 1):
         medal = "🥇" if i==1 else "🥈" if i==2 else ""
-        # Mettiamo uno scudo visivo se è il Safe Haven ma non ha vinto la medaglia d'oro
         if node == safe_haven_node and node != winner: medal += "🛡️" 
         
         issues = ", ".join(node_risks[node]) if node_risks[node] else "[green]✅ Stable[/green]"
         table.add_row(f"{i} {medal}", node, f"{score:.4f}", issues)
     
-    log.info(table)
+    # Visuale
+    console.print(table)
+    
+    # Log Sistema
+    log_ranking = [f"{n}: {s:.2f} ({'Risk' if node_risks[n] else 'Safe'})" for n, s in ranked_nodes]
+    log.info(f"Ranking calcolato: {log_ranking} | Strategy: {strategy}")
 
     # --- FASE 5: PREPARAZIONE DATI PER LLM ---
     metrics_keys = list(normalized_weights_map.keys())
     
-    # Funzione helper per formattare i dati di un singolo nodo
     def get_node_context(n_name):
-        if not n_name: return "N/A"
-        # Estraiamo i dati grezzi
+        if not n_name: 
+            return "N/A"
         raw = {k: metrics_data.get(n_name, {}).get(k) for k in metrics_keys}
-        # Li convertiamo in stringhe leggibili (es. "10 GB")
         fmt = humanize_metrics_with_config(raw, config)
         risks = node_risks[n_name]
         return {
             "name": n_name,
-            "score": f"{node_perf_scores[n_name]:.2f}", # Score tecnico
-            "risks": risks if risks else "STABILE",      # Etichette di rischio
-            "metrics": fmt                               # Dati leggibili
+            "score": f"{node_perf_scores[n_name]:.2f}",
+            "risks": risks if risks else "STABILE", 
+            "metrics": fmt 
         }
 
-    # Creiamo il JSON di contesto SOLO per i candidati scelti dalla strategia
     context_data = [get_node_context(n) for n in candidates_to_show]
-
     compressed_table = json_to_markdown_table(context_data, key_label="Node")
 
     # --- FASE 6: PROMPT DINAMICO ---
-    # Istruiamo l'LLM su come comportarsi in base alla Strategy calcolata in Fase 4.
-    
     prompt = f"""
     SEI UN ALLOCATION ADVISOR SRE AVANZATO.
     
@@ -535,22 +539,22 @@ async def allocation_advisor_node(state: AgentState):
     ISTRUZIONI DI GENERAZIONE (Segui rigorosamente la strategia):
     
     1. **CLEAR_WINNER**: 
-       - Il nodo '{winner}' è la scelta perfetta (Potente e Stabile).
-       - Raccomandalo senza esitazioni citando le sue metriche.
+        - Il nodo '{winner}' è la scelta perfetta (Potente e Stabile).
+        - Raccomandalo senza esitazioni citando le sue metriche.
     
     2. **CONSIDER_RUNNER_UP**: 
-       - Il Winner '{winner}' è potente ma ha rischi di stabilità (vedi 'risks').
-       - Il Runner-up '{runner_up}' è stabile.
-       - Devi proporre il Runner-up come alternativa solida.
-       
+        - Il Winner '{winner}' è potente ma ha rischi di stabilità (vedi 'risks').
+        - Il Runner-up '{runner_up}' è stabile.
+        - Devi proporre il Runner-up come alternativa solida.
+        
     3. **PROPOSE_SAFE_HAVEN** (Attenzione qui):
-       - I primi due classificati sono INSTABILI.
-       - L'algoritmo ha trovato un "Porto Sicuro": '{safe_haven_node}'.
-       - Il tuo compito è dire: "Sebbene {winner} sia più potente, consiglio vivamente {safe_haven_node} per carichi critici perché è l'unico con stabilità garantita."
-       
+        - I primi due classificati sono INSTABILI.
+        - L'algoritmo ha trovato un "Porto Sicuro": '{safe_haven_node}'.
+        - Il tuo compito è dire: "Sebbene {winner} sia più potente, consiglio vivamente {safe_haven_node} per carichi critici perché è l'unico con stabilità garantita."
+        
     4. **ALL_RISKY**: 
-       - Tutti i nodi mostrano instabilità.
-       - Consiglia il Winner '{winner}' ma aggiungi un disclaimer: "Monitoraggio richiesto: nessun nodo garantisce stabilità perfetta al momento."
+        - Tutti i nodi mostrano instabilità.
+        - Consiglia il Winner '{winner}' ma aggiungi un disclaimer: "Monitoraggio richiesto: nessun nodo garantisce stabilità perfetta al momento."
     
     """
     
@@ -571,35 +575,41 @@ async def allocation_advisor_node_llm(state: AgentState):
     stability_data = state.get("stability_report", {})
     config = state.get("qos_config", {})
     
+    # Header Visuale
+    console.print(Panel("🧠 Allocation Advisor (LLM Reasoning Mode)", style="grey50"))
+    log.info("Avvio Allocation Advisor (Modalità LLM autonoma).")
+
     # Se non ci sono candidati, usciamo subito
     if not candidates:
-        return {"messages": [AIMessage(content="❌ Nessun nodo idoneo trovato in base ai filtri applicati.")]}
+        msg = "❌ Nessun nodo idoneo trovato in base ai filtri applicati."
+        console.print(msg, style="bold red")
+        return {"messages": [AIMessage(content=msg)]}
 
     try:
         metrics_data = json.loads(metrics_json)
     except:
         metrics_data = {}
 
-    log.info(Panel("🧠 Allocation Advisor (LLM Reasoning Mode)", style="grey50"))
-
     # --- 2. PREPARAZIONE DEL CONTESTO (DATA PREP) ---
-    # Invece di calcolare uno score, prepariamo una "Scheda Tecnica" per ogni nodo.
-    # L'LLM deve ricevere dati puliti (es. "8 GB" e non "8589934592").
+    # Invece di calcolare uno score, preparo una "Scheda Tecnica" per ogni nodo.
     
     candidates_context = []
     
-    # Recuperiamo le metriche rilevanti per i profili richiesti
-    # (Per evitare di passare all'LLM 50 metriche inutili se ne servono solo 2)
+    # Recupero le metriche rilevanti
     relevant_metrics = set()
     if target_profiles:
         for p in target_profiles:
-            # Prendiamo le metriche definite nei pesi del profilo
             weights = config.get("profiles", {}).get(p, {}).get("scoring_weights", {})
             relevant_metrics.update(weights.keys())
     else:
-        # Fallback: se non ci sono profili, prendiamo tutto quello che abbiamo
         if candidates:
             relevant_metrics = metrics_data.get(candidates[0], {}).keys()
+
+    # Creo anche una tabella visiva per l'utente per capire cosa sto mandando all'LLM
+    table = Table(title="📊 Dati inviati all'LLM", show_header=True)
+    table.add_column("Nodo", style="bold cyan")
+    table.add_column("Stabilità", style="bold")
+    table.add_column("Metriche Rilevanti")
 
     for node in candidates:
         # A. Dati Metrici (Performance)
@@ -607,7 +617,6 @@ async def allocation_advisor_node_llm(state: AgentState):
         node_human_metrics = humanize_metrics_with_config(node_raw_metrics, config)
         
         # B. Dati Stabilità (Rischio)
-        # Cerchiamo se ci sono flag rossi nel report di stabilità
         risk_flags = []
         node_stability = stability_data.get(node, {})
         for metric, info in node_stability.items():
@@ -616,19 +625,26 @@ async def allocation_advisor_node_llm(state: AgentState):
                 risk_flags.append(f"{metric} is {status} ({info.get('reason')})")
         
         status_summary = "STABLE" if not risk_flags else f"UNSTABLE: {', '.join(risk_flags)}"
+        
+        # Coloriamo lo status per la tabella visiva
+        status_visual = "[green]STABLE[/green]" if not risk_flags else f"[red]⚠️ {len(risk_flags)} Issues[/red]"
 
         # C. Creazione Scheda Nodo
         candidates_context.append({
             "node_name": node,
             "performance_metrics": node_human_metrics,
             "stability_status": status_summary,
-            # Aggiungiamo un campo raw per aiutare l'LLM a ordinare se le unità sono confuse
             "_debug_raw_values": node_raw_metrics 
         })
 
-    # --- 3. COSTRUZIONE DEL PROMPT ---
-    # Qui diamo all'LLM il ruolo di Decision Maker.
+        # Aggiungiamo riga alla tabella visiva
+        table.add_row(node, status_visual, str(node_human_metrics))
 
+    # --- MOSTRA DATI UTENTE ---
+    console.print(table)
+    log.info(f"Contesto preparato per {len(candidates)} nodi. Invio all'LLM...")
+
+    # --- 3. COSTRUZIONE DEL PROMPT ---
     compressed_table = json_to_markdown_table(candidates_context, key_label="Node")
     
     prompt = f"""
@@ -654,9 +670,9 @@ async def allocation_advisor_node_llm(state: AgentState):
     
     """
 
-    # --- 4. INVOCAZIONE ---
     response = await llm.ainvoke(state["messages"] + [HumanMessage(content=prompt)])
     
+    log.info("Risposta LLM generata.")
     return {"messages": [response]}
 
 # async def conversational_node(state: AgentState):

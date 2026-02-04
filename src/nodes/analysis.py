@@ -2,15 +2,18 @@ import json
 import operator
 import asyncio
 from rich.panel import Panel
+from rich.console import Console
 
 # Import interni
 from src.state import AgentState
 from src.config import client
 from src.utils import parse_prometheus_output, get_strictest_threshold_config, get_physical_threshold, classify_stability
-# IMPORTA IL LOGGER CENTRALIZZATO
 from src.logger import log
 
-# Mappa degli operatori per la valutazione sicura (senza eval)
+
+console = Console()
+
+# Mappa degli operatori per la valutazione sicura 
 OPS = {
     "<": operator.lt,
     "<=": operator.le,
@@ -22,9 +25,11 @@ OPS = {
 
 async def single_profile_evaluator_node(state):
     """
-    NODO VALUTATORE (Deterministico).
-    Confronta le metriche dei nodi con i requisiti del profilo usando pura logica Python.
-    Non usa LLM (evita allucinazioni numeriche).
+    Valutatore di Profilo Singolo.
+    Controlla i nodi contro i requisiti definiti in un profilo QoS.
+    1. Itera sui nodi e verifica i requisiti matematici.
+    2. Registra i risultati dettagliati.
+    3. Prepara il payload di risultato.
     """
     profile = state["profile"]
     metrics_json = state["metrics"]
@@ -39,11 +44,10 @@ async def single_profile_evaluator_node(state):
     requirements = profile.get("required_conditions", [])
     
     qualified_nodes = []
-    analysis_log = {} # Dizionario per tracciare il "perché" un nodo passa o fallisce
+    analysis_log = {} 
 
     # 1. Iteriamo sui nodi
     for node, node_metrics in metrics_data.items():
-        # Se c'è un filtro attivo, saltiamo i nodi non richiesti
         if target_filter and node != target_filter:
             continue
 
@@ -58,13 +62,11 @@ async def single_profile_evaluator_node(state):
             
             val = node_metrics.get(metric_key)
             
-            # Fail-safe: se manca il dato, il nodo non è qualificato
             if val is None:
                 is_qualified = False
                 node_logs.append(f"{metric_key}: N/A (FAIL)")
                 break
 
-            # Esecuzione confronto
             op_func = OPS.get(op_sym)
             if op_func:
                 try:
@@ -72,10 +74,8 @@ async def single_profile_evaluator_node(state):
                     thresh_float = float(threshold)
                     
                     if op_func(val_float, thresh_float):
-                        # Requisito Soddisfatto
                         node_logs.append(f"{metric_key}: {val_float} {op_sym} {thresh_float} (PASS)")
                     else:
-                        # Requisito Fallito
                         is_qualified = False
                         node_logs.append(f"{metric_key}: {val_float} not {op_sym} {thresh_float} (FAIL)")
                 except ValueError:
@@ -94,22 +94,30 @@ async def single_profile_evaluator_node(state):
         "analysis_lines": analysis_log
     }
 
-    # LOGGING
+    # --- VISUALIZZAZIONE ---
     count = len(qualified_nodes)
     if count > 0:
-        log.info(f"⚡ Rule Engine ({profile_name}): [bold green]{count}[/bold green] nodi idonei.")
+        # Visuale per l'utente (con colori)
+        console.print(f"⚡ Profilo di carico valutato ({profile_name}): [bold green]{count}[/bold green] nodi idonei.")
+        # Log di sistema (testo pulito)
+        log.info(f"Profilo di carico valutato ({profile_name}): {count} nodi idonei.")
     else:
-        # Usiamo info (o debug) per non allarmare l'utente, è normale che alcuni profili non abbiano match
-        log.info(f"⚡ Rule Engine ({profile_name}): Nessun nodo soddisfa i requisiti.")
+        console.print(f"⚡ Profilo di carico valutato ({profile_name}): Nessun nodo soddisfa i requisiti.", style="yellow")
+        log.info(f"Profilo di carico valutato ({profile_name}): Nessun nodo soddisfa i requisiti.")
 
-    # Restituiamo una stringa JSON come si aspetta il grafo (per MapReduce)
     return {"profile_results": [json.dumps(result_payload)]}
 
 
 async def stability_analyzer_node(state: AgentState):
     """
-    Analisi Stabilità Storica (24h).
-    Esegue query Prometheus in parallelo per calcolare Media e Deviazione Standard.
+    Nodo di Analisi di Stabilità.
+    Esegue analisi storiche parallele per identificare anomalie nei nodi candidati
+    rispetto ai profili di carico individuati.
+    1. Recupera i nodi candidati e i profili di carico individuati.
+    2. Costruisce ed esegue query storiche in parallelo.
+    3. Analizza i risultati per classificare la stabilità.
+    4. Prepara il report di stabilità.
+
     """
     candidates = state.get("final_candidates", [])
     target_profiles = state.get("target_profiles", [])
@@ -118,44 +126,41 @@ async def stability_analyzer_node(state: AgentState):
     profiles_def = config.get("profiles", {})
     metrics_json = state.get("metrics_report", "{}")
     
-    # Se non ci sono candidati, saltiamo l'analisi costosa
     if not candidates or not target_profiles:
         return {"stability_report": {}}
 
-    # Recupero Tool Query
     tools = await client.get_tools()
     query_tool = next((t for t in tools if t.name == "execute_query"), None)
     if not query_tool: 
         log.error("Tool 'execute_query' mancante. Salto analisi stabilità.")
         return {"stability_report": {}}
 
-    # Header Visivo nel Log
-    log.info(Panel("📉 Avvio Analisi Stabilità (Parallel Async)", style="blue"))
 
-    # 1. Identificazione Metriche da analizzare (in base ai pesi dei profili scelti)
+    console.print(Panel("📉 Avvio Analisi Stabilità (Parallel Async)", style="blue"))
+    log.info("Avvio Analisi Stabilità.")
+
+    # Trova le soglie più restrittive dai profili target (Principio di Cautela)
     active_thresholds_map = get_strictest_threshold_config(target_profiles, profiles_def)
     metrics_to_analyze = set()
     for p in target_profiles:
+        # Per ogni profilo target recupero i nomi delle metriche a cui sono associati pesi di scoring
         metrics_to_analyze.update(profiles_def.get(p, {}).get("scoring_weights", {}).keys())
 
-    # Parametri temporali
     time_window = "24h"
     resolution = "5m"
     
-    # 2. Preparazione Batch di Query Asincrone
     tasks = []
     task_metadata = [] 
 
+    # Costruzione ed esecuzione query storiche in parallelo
     for metric_name in metrics_to_analyze:
         this_metric_def = metrics_def.get(metric_name, {})
         base_query = this_metric_def.get("query")
         if not base_query: continue
 
-        # Costruiamo le query PromQL
         q_avg = f"avg_over_time(({base_query})[{time_window}:{resolution}])"
         q_std = f"stddev_over_time(({base_query})[{time_window}:{resolution}])"
 
-        # Aggiungiamo alla coda di esecuzione
         tasks.append(query_tool.ainvoke({"query": q_avg}))
         task_metadata.append({"metric": metric_name, "type": "avg"})
 
@@ -165,12 +170,13 @@ async def stability_analyzer_node(state: AgentState):
     if not tasks:
         return {"stability_report": {}}
 
-    log.info(f"🚀 Lancio [bold]{len(tasks)}[/bold] query storiche simultanee...")
+    # Visuale
+    console.print(f"🚀 Lancio [bold]{len(tasks)}[/bold] query storiche simultanee...")
+    # Log
+    log.info(f"Lancio {len(tasks)} query storiche simultanee...")
 
-    # 3. Esecuzione Parallela (Scatter-Gather)
     results_raw = await asyncio.gather(*tasks, return_exceptions=True)
 
-    # 4. Elaborazione Risultati
     temp_results = {} 
     for i, res in enumerate(results_raw):
         meta = task_metadata[i]
@@ -182,10 +188,10 @@ async def stability_analyzer_node(state: AgentState):
             continue
         
         parsed_data = parse_prometheus_output(res, m_name)
-        if m_name not in temp_results: temp_results[m_name] = {}
+        if m_name not in temp_results: 
+            temp_results[m_name] = {}
         temp_results[m_name][q_type] = parsed_data
 
-    # 5. Classificazione Stabilità
     stability_report = {}
     try:
         current_data_snapshot = json.loads(metrics_json)
@@ -198,7 +204,6 @@ async def stability_analyzer_node(state: AgentState):
         parsed_avg = data_pair.get("avg", {})
         parsed_std = data_pair.get("std", {})
         
-        # Recupero soglia fisica (es. CPU non può superare 100%)
         this_metric_def = metrics_def.get(metric_name, {})
         phys_threshold = get_physical_threshold(metric_name, this_metric_def, active_thresholds_map)
 
@@ -208,7 +213,6 @@ async def stability_analyzer_node(state: AgentState):
             std_val = parsed_std.get(node)
 
             if curr_val is not None and avg_val is not None:
-                # Algoritmo di rilevamento anomalie (Z-Score semplificato)
                 result = classify_stability(float(curr_val), avg_val, std_val, phys_threshold)
                 
                 if node not in stability_report: stability_report[node] = {}
@@ -219,12 +223,16 @@ async def stability_analyzer_node(state: AgentState):
                 }
 
                 if result["status"] in ["SPIKE", "CHAOTIC"]:
-                    log.warning(f"⚠️ Instabilità rilevata su {node} [{metric_name}]: {result['status']}")
+                    # Qui warning va bene sia per console che log perché è importante
+                    console.print(f"⚠️ Instabilità rilevata su {node} [{metric_name}]: {result['status']}", style="bold red")
+                    log.warning(f"Instabilità rilevata su {node} [{metric_name}]: {result['status']}")
                     spikes_found += 1
     
     if spikes_found == 0:
-        log.info("✅ Analisi storica completata: Nessuna anomalia critica.")
+        console.print("✅ Analisi storica completata: Nessuna anomalia critica.", style="green")
+        log.info("Analisi storica completata: Nessuna anomalia critica.")
     else:
-        log.info(f"ℹ️ Analisi storica completata: {spikes_found} possibili anomalie tracciate.")
+        console.print(f"ℹ️ Analisi storica completata: {spikes_found} possibili anomalie tracciate.", style="yellow")
+        log.info(f"Analisi storica completata: {spikes_found} possibili anomalie tracciate.")
 
     return {"stability_report": stability_report}

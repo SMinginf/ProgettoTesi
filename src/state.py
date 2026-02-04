@@ -12,8 +12,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[AnyMessage], operator.add] # Storia della chat
 
     active_targets: List[str]        # Lista dei target attivi
-    #retry_count: int           # Contatore per i tentativi di correzione
-    #last_error: str            # Ultimo errore riscontrato (per il Refiner)
+    
     sanity_check_ok: bool
 
     # Dati strutturati raccolti

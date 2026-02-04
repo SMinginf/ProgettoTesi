@@ -52,7 +52,7 @@ class UserConstraint(BaseModel):
 
 class RequirementExtraction(BaseModel):
     """Output del Nodo 2: Estrazione vincoli."""
-    constraints: List[UserConstraint] = Field(default=[], description="Lista dei vincoli espliciti estratti dall'input utente.")
+    constraints: List[Optional[UserConstraint]] = Field(default=[], description="Lista dei vincoli espliciti estratti dall'input utente.")
 
 class TaskProfileIntent(BaseModel):
     """

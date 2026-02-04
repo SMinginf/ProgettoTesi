@@ -174,9 +174,8 @@ def humanize_metrics_with_config(metrics_dict: dict, qos_config: dict) -> dict:
 
 def get_strictest_threshold_config(target_profiles: list, all_profiles_def: dict) -> dict:
     """
-    Estrae SOLO le soglie di stabilità dai profili attivi.
+    Estrae le soglie di stabilità dai profili target.
     Se c'è conflitto su una metrica, vince la soglia MINORE (Principio di Cautela).
-    Ignora completamente i pesi.
     """
     threshold_map = {} # { "cpu_usage": 5.0, "disk_usage": 2.0 }
 

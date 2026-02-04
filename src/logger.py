@@ -30,12 +30,10 @@ def setup_logger(level="INFO"):
         level=level,
         format="%(message)s", # Rich aggiunge già il timestamp, qui mettiamo solo il messaggio
         datefmt="[%X]",
-        handlers=[RichHandler(
-            console=console, 
-            rich_tracebacks=True, # Mostra gli errori in modo espanso e colorato
-            markup=True,          # Abilita i tag [bold] ecc. nei messaggi di log
-            show_path=False       # Metti True se vuoi vedere in quale file è stato generato il log
-        )]
+        handlers=[
+                # disattivo il logging su console
+                #RichHandler(console=console, rich_tracebacks=True, markup=True, show_path=False)
+            ]
     )
     
     # Crea un logger specifico per la tua tesi
