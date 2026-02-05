@@ -438,9 +438,10 @@ async def allocation_advisor_node(state: AgentState):
             # Recupero le info sulla stabilità della metrica per questo nodo
             stab_info = stability_data.get(node, {}).get(metric_name, {})
             status = stab_info.get("status", "UNKNOWN")
+            reason = stab_info.get("reason", "")
             
-            if status in ["SPIKE", "CHAOTIC", "DRIFT"]:
-                node_risks[node].append(f"{metric_name}: {status}")
+            if status in ["SPIKE", "CHAOTIC"]:
+                node_risks[node].append(f"{metric_name} -> {reason}")
 
     # --- FASE 3: RANKING & RESCUE SCAN ---
     ranked_nodes = sorted(node_perf_scores.items(), key=lambda x: x[1], reverse=True)
@@ -472,7 +473,6 @@ async def allocation_advisor_node(state: AgentState):
         # Se il winner non è safe, ma abbiamo un porto sicuro
         if safe_haven_node == runner_up:
             strategy = "CONSIDER_RUNNER_UP"
-            # Nota: runner_up è già stato aggiunto al punto 2
         else:
             strategy = "PROPOSE_SAFE_HAVEN"
             # Unica eccezione: qui dobbiamo aggiungere un terzo nodo
@@ -515,12 +515,45 @@ async def allocation_advisor_node(state: AgentState):
         return {
             "name": n_name,
             "score": f"{node_perf_scores[n_name]:.2f}",
-            "risks": risks if risks else "STABILE", 
+            "risks": risks if risks else "STABLE", 
             "metrics": fmt 
         }
 
     context_data = [get_node_context(n) for n in candidates_to_show]
     compressed_table = json_to_markdown_table(context_data, key_label="Node")
+
+    # Definizione delle istruzioni specifiche per ogni strategia
+    strategies_map = {
+        "CLEAR_WINNER": f"""
+        - FOCUS: Conferma immediata.
+        - SITUAZIONE: Il nodo '{winner}' è la scelta dominante (sia per potenza che stabilità).
+        - AZIONE: Raccomandalo decisamente. Cita le metriche specifiche che lo rendono superiore.
+        """,
+
+        "CONSIDER_RUNNER_UP": f"""
+        - FOCUS: Trade-off tra Potenza e Sicurezza.
+        - SITUAZIONE: Il nodo '{winner}' è potente ma presenta rischi (vedi metriche 'risks'). Il nodo '{runner_up}' è l'alternativa stabile.
+        - AZIONE: Evidenzia i rischi del vincitore e proponi '{runner_up}' come alternativa solida per carichi di lavoro che non tollerano fallimenti.
+        """,
+
+        "PROPOSE_SAFE_HAVEN": f"""
+        - FOCUS: Mitigazione del Rischio (Critical Warning).
+        - SITUAZIONE: I primi due classificati ({winner} e il secondo) sono INSTABILI. Spiega perchè.
+        - AZIONE: Devi spostare l'attenzione sul 'Porto Sicuro': '{safe_haven_node}'.
+        - ARGOMENTAZIONE: "Sebbene {winner} abbia metriche di performance migliori, per carichi critici consiglio vivamente {safe_haven_node} poiché è l'unico con stabilità operativa garantita."
+        """,
+
+        "ALL_RISKY": f"""
+        - FOCUS: Gestione dell'incertezza.
+        - SITUAZIONE: Nessun nodo offre garanzie di stabilità completa. Per ogni nodo spiega il perchè.
+        - AZIONE: Consiglia '{winner}' come "il male minore" o la scelta tecnicamente migliore, ma allega un DISCLAIMER OBBLIGATORIO.
+    
+        """
+    }
+
+    # Selezione delle istruzioni in base alla strategia attuale
+    # Se la strategia non è in lista, usa un fallback generico
+    current_instructions = strategies_map.get(strategy, "Analizza i dati e raccomanda il nodo migliore bilanciando risorse e rischi.")
 
     # --- FASE 6: PROMPT DINAMICO ---
     prompt = f"""
@@ -533,29 +566,13 @@ async def allocation_advisor_node(state: AgentState):
       
     COMPITO:
     Scrivi una raccomandazione professionale per l'utente.
-    Spiega PERCHÉ {winner} è la scelta migliore basandoti sui dati reali (es. "Ha 5GB di RAM in più"). Cita ognuna delle metriche dateti.
-    Spiega cosa lo differenzia dal secondo classificato.
+    Indica i punti di forza di {winner} rispetto a {runner_up}, ma anche i punti di debolezza, se presenti, in tal caso NON inventare giustificazioni positive per il {winner} ma ammetti le sue debolezze.
+    Basati sui dati reali (es. "Ha 5 GB di RAM in più). 
+    Cita ognuna delle metriche date.
     
-    ISTRUZIONI DI GENERAZIONE (Segui rigorosamente la strategia):
-    
-    1. **CLEAR_WINNER**: 
-        - Il nodo '{winner}' è la scelta perfetta (Potente e Stabile).
-        - Raccomandalo senza esitazioni citando le sue metriche.
-    
-    2. **CONSIDER_RUNNER_UP**: 
-        - Il Winner '{winner}' è potente ma ha rischi di stabilità (vedi 'risks').
-        - Il Runner-up '{runner_up}' è stabile.
-        - Devi proporre il Runner-up come alternativa solida.
-        
-    3. **PROPOSE_SAFE_HAVEN** (Attenzione qui):
-        - I primi due classificati sono INSTABILI.
-        - L'algoritmo ha trovato un "Porto Sicuro": '{safe_haven_node}'.
-        - Il tuo compito è dire: "Sebbene {winner} sia più potente, consiglio vivamente {safe_haven_node} per carichi critici perché è l'unico con stabilità garantita."
-        
-    4. **ALL_RISKY**: 
-        - Tutti i nodi mostrano instabilità.
-        - Consiglia il Winner '{winner}' ma aggiungi un disclaimer: "Monitoraggio richiesto: nessun nodo garantisce stabilità perfetta al momento."
-    
+    ISTRUZIONI DI GENERAZIONE:
+    {current_instructions}
+   
     """
     
     response = await llm.ainvoke(state["messages"] + [HumanMessage(content=prompt)])
@@ -621,7 +638,7 @@ async def allocation_advisor_node_llm(state: AgentState):
         node_stability = stability_data.get(node, {})
         for metric, info in node_stability.items():
             status = info.get("status", "UNKNOWN")
-            if status in ["SPIKE", "CHAOTIC", "DRIFT"]:
+            if status in ["SPIKE", "CHAOTIC"]:
                 risk_flags.append(f"{metric} is {status} ({info.get('reason')})")
         
         status_summary = "STABLE" if not risk_flags else f"UNSTABLE: {', '.join(risk_flags)}"

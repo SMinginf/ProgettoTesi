@@ -251,11 +251,15 @@ def classify_stability(current, avg, std, delta_threshold):
 
     # LOGICA DI CLASSIFICAZIONE
     if cv > CV_CHAOS_THRESHOLD:
-        return {"status": "CHAOTIC", "reason": f"Alta variabilità (CV={cv:.2f})", "metrics": {"z": z_score, "cv": cv}}
+        return {"status": "CHAOTIC", 
+                "reason": f"Instabilità cronica: Il CV ({cv:.2f}) è troppo alto, indicando un utilizzo delle risorse erratico e imprevedibile. Rischio elevato di saturazione improvvisa.", 
+                "metrics": {"z": z_score, "cv": cv}}
 
     if z_score > Z_THRESHOLD:
         if delta > delta_threshold:
-            return {"status": "SPIKE", "reason": f"Picco anomalo (+{delta:.2f} > soglia {delta_threshold})", "metrics": {"z": z_score, "cv": cv}}
+            return {"status": "SPIKE", 
+                    "reason": f"Picco di carico acuto: Rilevato un aumento improvviso (+{delta:.2f}) che supera la soglia di sicurezza. Nonostante lo storico calmo, il nodo è sotto stress immediato.", 
+                    "metrics": {"z": z_score, "cv": cv}}
         else:
             return {"status": "FALSE_ALARM", "reason": "Variazione statistica trascurabile", "metrics": {"z": z_score, "cv": cv}}
             
